@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import aiohttp
 from datetime import datetime, date, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -80,15 +81,19 @@ class EmojiState(StatesGroup):
     wait_forward = State()
 
 # ─── MENYULAR ──────────────────────────────────────────────────
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📞 Nomer olish"),   KeyboardButton(text="🛒 Buyurtmalarim")],
-        [KeyboardButton(text="💰 Hisobim"),        KeyboardButton(text="💳 Hisob to'ldirish")],
-        [KeyboardButton(text="💸 Pul ishlash"),    KeyboardButton(text="📕 Qo'llanma")],
-        [KeyboardButton(text="🆘 Qo'llab-quvvatlash")],
-    ],
-    resize_keyboard=True
-)
+def build_main_menu() -> ReplyKeyboardMarkup:
+    """Har chaqirilganda joriy bog'langan Premium emoji/style holatiga
+    qarab qayta tuziladi — shuning uchun admin /setemoji bilan
+    bog'lagach, pastdagi menyu ham darhol yangilanadi."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [kb_button("Nomer olish", "phone"),   kb_button("Buyurtmalarim", "cart")],
+            [kb_button("Hisobim", "money"),        kb_button("Hisob to'ldirish", "card", style="primary")],
+            [kb_button("Pul ishlash", "cash"),     kb_button("Qo'llanma", "guide")],
+            [kb_button("Qo'llab-quvvatlash", "support")],
+        ],
+        resize_keyboard=True
+    )
 
 def phone_request_kb():
     return ReplyKeyboardMarkup(
@@ -164,6 +169,16 @@ def country_flag(code: str) -> str:
         return "🌍"
     return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
 
+_FLAG_EMOJI_RE = re.compile("[\U0001F1E6-\U0001F1FF]+")
+
+def clean_country_name(name: str) -> str:
+    """API'dan kelgan davlat nomida allaqachon bayroq bo'lishi mumkin — shu
+    bayroqni olib tashlaydi, shunda o'zimizning country_flag() bilan
+    ikkilanib qo'yilmaydi (masalan 'Uzbekistan 🇺🇿' -> 'Uzbekistan')."""
+    if not name:
+        return name
+    return _FLAG_EMOJI_RE.sub("", name).strip()
+
 # ─── PREMIUM (CUSTOM) EMOJI ─────────────────────────────────────
 # 2026-yil 9-fevral Bot API yangilanishidan buyon, agar botni
 # yaratgan akkaunt (@BotFather orqali) Telegram Premium obunasiga
@@ -216,6 +231,7 @@ PREMIUM_EMOJI_SLUGS = {
     "bank":      "🏦",
     "one":       "1️⃣",
     "two":       "2️⃣",
+    "cash":      "💸",
 }
 
 PREMIUM_EMOJI_CACHE: dict[str, str] = {}
@@ -235,13 +251,42 @@ def E(slug: str) -> str:
     Slug uchun, agar admin haqiqiy custom_emoji_id bog'lagan bo'lsa —
     Premium emojini (<tg-emoji>) qaytaradi, aks holda oddiy fallback
     emojini qaytaradi. FAQAT xabar matni ichida ishlating (tugmalarda
-    emas — Telegram tugma matnini HTML sifatida talqin qilmaydi).
+    emas — buning uchun pastdagi kb_button()/ib_button() dan foydalaning).
     """
     fallback = PREMIUM_EMOJI_SLUGS.get(slug, "▫️")
     custom_id = PREMIUM_EMOJI_CACHE.get(slug)
     if custom_id:
         return f'<tg-emoji emoji-id="{custom_id}">{fallback}</tg-emoji>'
     return fallback
+
+# ─── TUGMALARDA PREMIUM EMOJI (Bot API 9.4+) ────────────────────
+# 2026-yildan boshlab Telegram tugmalarga ham icon_custom_emoji_id
+# (matndan OLDIN chiqadigan ikonka) va style ("primary"/"success"/
+# "danger") qo'shishga ruxsat berdi. Bog'langan slug bo'lsa — icon
+# sifatida shuni qo'yamiz va matndan otiladigan emojini olib
+# tashlaymiz (aks holda ikkitasi bir vaqtda chiqib qoladi). Bog'lanmagan
+# bo'lsa — oddiy fallback emojini matn boshiga qo'shib qo'yamiz.
+def kb_button(label: str, slug: str | None = None, style: str | None = None, **kwargs) -> "KeyboardButton":
+    """Pastdagi (reply) menyu tugmasi. DIQQAT: matn har doim fallback
+    emoji bilan barqaror qoladi (masalan '💳 Hisob to'ldirish'), chunki
+    bot xabarlarni aynan shu matn bo'yicha F.text == "..." orqali
+    aniqlaydi — agar Premium ulanganda matn o'zgarib ketsa, tugma
+    ishlamay qoladi. Shuning uchun icon_custom_emoji_id faqat QO'SHIMCHA
+    bezak sifatida qo'yiladi, matnni almashtirmaydi."""
+    icon_id  = PREMIUM_EMOJI_CACHE.get(slug) if slug else None
+    fallback = PREMIUM_EMOJI_SLUGS.get(slug, "") if slug else ""
+    text = f"{fallback} {label}".strip() if fallback else label
+    return KeyboardButton(text=text, icon_custom_emoji_id=icon_id, style=style, **kwargs)
+
+def ib_button(label: str, slug: str | None = None, style: str | None = None, **kwargs) -> "InlineKeyboardButton":
+    """Xabar ostidagi (inline) tugma. Bular callback_data/url orqali
+    aniqlanadi (matn orqali emas), shuning uchun bu yerda Premium
+    bog'langanda fallback emojini matndan olib tashlash xavfsiz —
+    ikkilanib qolmaydi."""
+    icon_id  = PREMIUM_EMOJI_CACHE.get(slug) if slug else None
+    fallback = PREMIUM_EMOJI_SLUGS.get(slug, "") if slug else ""
+    text = label if icon_id else (f"{fallback} {label}".strip() if fallback else label)
+    return InlineKeyboardButton(text=text, icon_custom_emoji_id=icon_id, style=style, **kwargs)
 
 def now_tashkent() -> datetime:
     return datetime.now(TASHKENT_TZ)
@@ -268,7 +313,9 @@ async def emojis_list_cmd(msg: Message):
         "<code>/getemojiid</code> yuboring, so'ng shu emojini o'z ichiga olgan xabarni yuboring.\n"
         "2️⃣ Bot sizga o'sha emojining ID sini chiqaradi.\n"
         "3️⃣ <code>/setemoji slug id</code> — masalan: <code>/setemoji money 5368324170671202286</code>\n"
-        "4️⃣ Bekor qilish uchun: <code>/unsetemoji slug</code>"
+        "4️⃣ Bekor qilish uchun: <code>/unsetemoji slug</code>\n\n"
+        f"{E('sparkle')} <b>Endi bog'langan sluglar avtomatik ravishda</b> xabar matnlarida "
+        f"HAM, pastdagi menyu va tugmalarda HAM (icon sifatida) qo'llanadi — alohida sozlash shart emas."
     )
     await msg.answer("\n".join(lines))
 
@@ -485,7 +532,7 @@ async def pay_cancel_any(msg: Message, state: FSMContext):
     if pay_id:
         await db.delete_pending_payment(pay_id)
     await state.clear()
-    await msg.answer("❌ To'lov bekor qilindi.", reply_markup=main_menu)
+    await msg.answer("❌ To'lov bekor qilindi.", reply_markup=build_main_menu())
 
 
 @router.message(F.text == "💳 Hisob to'ldirish")
@@ -528,7 +575,7 @@ async def pay_amount_received(msg: Message, state: FSMContext):
     await state.set_state(PayStates.wait_check)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"cancel_pay:{pay_id}")],
+        [ib_button("Bekor qilish", "cross", style="danger", callback_data=f"cancel_pay:{pay_id}")],
     ])
 
     await msg.answer(
@@ -556,7 +603,7 @@ async def _pay_timeout(pay_id: str, user_id: int, amount: int):
                 user_id,
                 f"{E('hourglass')} <b>{amount:,} so'm</b>lik to'lovingiz uchun berilgan vaqt tugadi, shuning uchun bekor qilindi.\n"
                 f"Qayta urinish uchun «{E('card')} Hisob to'ldirish» tugmasini bosing.",
-                reply_markup=main_menu
+                reply_markup=build_main_menu()
             )
         except Exception:
             pass
@@ -572,15 +619,15 @@ async def pay_check_received(msg: Message, state: FSMContext):
         await msg.answer(
             f"{E('cross')} Bu to'lovning muddati tugagan yoki u bekor qilingan.\n"
             f"Qaytadan «{E('card')} Hisob to'ldirish» tugmasini bosing.",
-            reply_markup=main_menu
+            reply_markup=build_main_menu()
         )
         await state.clear()
         return
 
     photo_id = msg.photo[-1].file_id
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"pay_ok:{pay_id}"),
-        InlineKeyboardButton(text="❌ Rad etish",  callback_data=f"pay_no:{pay_id}"),
+        ib_button("Tasdiqlash", "check", style="success", callback_data=f"pay_ok:{pay_id}"),
+        ib_button("Rad etish",  "cross", style="danger",  callback_data=f"pay_no:{pay_id}"),
     ]])
 
     try:
@@ -601,7 +648,7 @@ async def pay_check_received(msg: Message, state: FSMContext):
     await msg.answer(
         f"{E('check')} Chekingiz qabul qilindi va adminga yuborildi!\n"
         f"{E('hourglass')} Tasdiqlanishini kuting — bu odatda uzoq davom etmaydi {E('sparkle')}",
-        reply_markup=main_menu
+        reply_markup=build_main_menu()
     )
     await state.clear()
 
@@ -662,7 +709,7 @@ async def cancel_pay_cb(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text("❌ To'lov bekor qilindi.")
     try:
-        await bot.send_message(call.from_user.id, "Bosh menyuga qaytdingiz.", reply_markup=main_menu)
+        await bot.send_message(call.from_user.id, "Bosh menyuga qaytdingiz.", reply_markup=build_main_menu())
     except Exception:
         pass
     await call.answer()
@@ -704,9 +751,9 @@ def welcome_text(first_name: str) -> str:
 async def send_main(target, first_name: str = ""):
     text = welcome_text(first_name)
     if isinstance(target, Message):
-        await target.answer(text, reply_markup=main_menu)
+        await target.answer(text, reply_markup=build_main_menu())
     else:
-        await target.message.answer(text, reply_markup=main_menu)
+        await target.message.answer(text, reply_markup=build_main_menu())
 
 async def _extract_referrer_id(msg: Message) -> int | None:
     args = msg.text.split()
@@ -771,7 +818,7 @@ async def check_sub_cb(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    await bot.send_message(call.from_user.id, "✅ Obuna tasdiqlandi!", reply_markup=main_menu)
+    await bot.send_message(call.from_user.id, "✅ Obuna tasdiqlandi!", reply_markup=build_main_menu())
     await call.answer()
 
 @router.message(F.content_type == "contact")
@@ -807,15 +854,15 @@ async def phone_received(msg: Message, state: FSMContext):
             try:
                 await bot.send_message(
                     referrer_id,
-                    f"🎉 Siz taklif qilgan foydalanuvchi botga qo'shildi!\n"
-                    f"💰 Hisobingizga <b>{ref_bonus:,} so'm</b> qo'shildi!"
+                    f"{E('party')} Siz taklif qilgan foydalanuvchi botga qo'shildi!\n"
+                    f"{E('money')} Hisobingizga <b>{ref_bonus:,} so'm</b> qo'shildi!"
                 )
             except (TelegramForbiddenError, TelegramBadRequest):
                 pass
         else:
             await db.add_referral(referrer_id, user_id)
 
-    await msg.answer("✅ Telefon raqamingiz tasdiqlandi!", reply_markup=ReplyKeyboardRemove())
+    await msg.answer(f"{E('check')} Telefon raqamingiz tasdiqlandi!", reply_markup=ReplyKeyboardRemove())
     await send_main(msg, msg.from_user.first_name)
 
 @router.message(PhoneState.wait_phone)
@@ -867,7 +914,7 @@ async def build_countries_page(page: int):
     buttons = []
     for code, info in sorted_countries[start:end]:
         qty       = info.get("qty", 0)
-        name      = info.get("name", code)
+        name      = clean_country_name(info.get("name", code))
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
@@ -934,7 +981,7 @@ async def top10_countries(call: CallbackQuery):
     buttons = []
     for code, info in sorted_c:
         qty       = info.get("qty", 0)
-        name      = info.get("name", code)
+        name      = clean_country_name(info.get("name", code))
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
@@ -958,7 +1005,7 @@ async def cheap_countries(call: CallbackQuery):
     buttons = []
     for code, info in sorted_c:
         qty       = info.get("qty", 0)
-        name      = info.get("name", code)
+        name      = clean_country_name(info.get("name", code))
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
@@ -979,7 +1026,7 @@ async def _country_name(country_code: str) -> str:
     data = await api_available_countries()
     countries = data.get("countries", {}) if data.get("status") == "ok" else {}
     info = countries.get(country_code, {})
-    return info.get("name", country_code)
+    return clean_country_name(info.get("name", country_code))
 
 @router.callback_query(F.data.startswith("buy:"))
 async def buy_number(call: CallbackQuery):
@@ -1001,18 +1048,18 @@ async def buy_number(call: CallbackQuery):
     flag = country_flag(country_code)
 
     text = (
-        f"🧾 <b>Siz sotib olmoqchi bo'layotgan raqam haqida ma'lumot:</b>\n\n"
-        f"🌐 Davlat: <b>{name} {flag}</b>\n"
-        f"💵 Narxi: <b>{uzs_price:,} so'm</b>\n\n"
+        f"{E('receipt')} <b>Siz sotib olmoqchi bo'layotgan raqam haqida ma'lumot:</b>\n\n"
+        f"{E('globe')} Davlat: <b>{name} {flag}</b>\n"
+        f"{E('money')} Narxi: <b>{uzs_price:,} so'm</b>\n\n"
         f"<blockquote>❗️ Diqqat: Botdan olingan raqamlar uchun hech qanday kafolat berilmaydi va pul qaytarilmaydi!</blockquote>\n\n"
         f"<blockquote>📌 Rasmiy Telegramdan olmang!!!\n"
         f"Agar siz rasmiy Telegram ilovasidan foydalansangiz, pulingiz 100% kuyadi va bu uchun bot va admin javobgar emas!\n"
         f"Faqat 🟢 Telegraph yoki Plus kabi ilovalardan foydalanish tavsiya etiladi!!!</blockquote>\n\n"
-        f"👉 Shartlar bilan to'liq tanishib chiqing va \"🛒 Sotib olish\" tugmasini bosing!"
+        f"{E('point')} Shartlar bilan to'liq tanishib chiqing va \"🛒 Sotib olish\" tugmasini bosing!"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 Sotib olish", callback_data=f"terms:{country_code}:{uzs_price}")],
-        [InlineKeyboardButton(text="🚫 Bekor qilish", callback_data="countries_page:0")]
+        [ib_button("Sotib olish", "cart", style="success", callback_data=f"terms:{country_code}:{uzs_price}")],
+        [ib_button("Bekor qilish", "cross", style="danger", callback_data="countries_page:0")]
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
@@ -1078,7 +1125,7 @@ async def confirm_buy(call: CallbackQuery):
         if result.get("status") != "ok":
             err = result.get("message", "Noma'lum xato")
             await call.message.edit_text(
-                f"❌ Raqam olishda xatolik yuz berdi: {err}\n\n"
+                f"{E('cross')} Raqam olishda xatolik yuz berdi: {err}\n\n"
                 f"Mablag'ingiz hisobingizdan yechilmadi — istasangiz qayta urinib ko'rishingiz mumkin.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="⬅️ Davlatlar ro'yxatiga qaytish", callback_data="countries_page:0")]
@@ -1088,7 +1135,7 @@ async def confirm_buy(call: CallbackQuery):
             return
 
         number   = result.get("Number", "")
-        api_name = result.get("name", country_code)
+        api_name = clean_country_name(result.get("name", country_code))
         await db.update_balance(user_id, -uzs_price)
         await db.log_transaction(user_id, "purchase", -uzs_price, note=f"{country_code}:{number}")
         order_id = await db.log_purchase(user_id, number, country_code, api_name, uzs_price)
@@ -1096,11 +1143,11 @@ async def confirm_buy(call: CallbackQuery):
             orders_ch = await get_setting("orders_channel_id", ORDERS_CHANNEL)
             await bot.send_message(
                 int(orders_ch),
-                f"🛒 <b>Yangi TG Akkaunt buyurtmasi</b>\n\n"
-                f"👤 Foydalanuvchi: <code>{user_id}</code>\n"
-                f"🌍 Mamlakat: {api_name}\n"
-                f"📞 Raqam: <code>{number}</code>\n"
-                f"💰 Narx: {uzs_price:,} so'm\n"
+                f"{E('cart')} <b>Yangi TG Akkaunt buyurtmasi</b>\n\n"
+                f"{E('profile')} Foydalanuvchi: <code>{user_id}</code>\n"
+                f"{E('globe')} Mamlakat: {api_name}\n"
+                f"{E('phone')} Raqam: <code>{number}</code>\n"
+                f"{E('money')} Narx: {uzs_price:,} so'm\n"
                 f"🆔 Buyurtma #{order_id}"
             )
         except Exception:
@@ -1110,11 +1157,11 @@ async def confirm_buy(call: CallbackQuery):
             [InlineKeyboardButton(text="🛒 Buyurtmalarim", callback_data="my_orders_inline")],
         ])
         await call.message.edit_text(
-            f"✅ <b>Raqam muvaffaqiyatli olindi!</b>\n\n"
-            f"📞 Raqamingiz: <code>{number}</code>\n"
-            f"💰 Narxi: {uzs_price:,} so'm\n\n"
-            f"⚠️ Faqat norasmiy (Telegraph kabi) ilovalardan foydalaning.\n\n"
-            f"💡 Kirish kodini olish uchun pastdagi «🔑 SMS kodni olish» tugmasini bosing.",
+            f"{E('check')} <b>Raqam muvaffaqiyatli olindi!</b>\n\n"
+            f"{E('phone')} Raqamingiz: <code>{number}</code>\n"
+            f"{E('money')} Narxi: {uzs_price:,} so'm\n\n"
+            f"{E('warn')} Faqat norasmiy (Telegraph kabi) ilovalardan foydalaning.\n\n"
+            f"{E('sparkle')} Kirish kodini olish uchun pastdagi «🔑 SMS kodni olish» tugmasini bosing.",
             reply_markup=kb
         )
     await call.answer()
@@ -1160,7 +1207,7 @@ async def my_orders(msg: Message, override_user_id: int | None = None):
     await msg.answer(f"🛒 <b>Sizning buyurtmalaringiz ({len(orders)} ta):</b>")
     for i, order in enumerate(orders[:20], 1):
         phone       = order['phone']
-        country     = order['country_name']
+        country     = clean_country_name(order['country_name'])
         price       = order['price']
         bought_date = order['created_at']
         flag        = country_flag(order.get('country_code', ''))
@@ -1614,7 +1661,7 @@ async def price_single_start(call: CallbackQuery, state: FSMContext):
     ordered = sort_uz_first(filtered.items(), key_func=lambda x: float(x[1].get("price", 999)))[:20]
     buttons = []
     for code, info in ordered:
-        name  = info.get("name", code)
+        name  = clean_country_name(info.get("name", code))
         flag  = country_flag(code)
         cur   = markup_prices.get(code.upper(), None)
         label = f"{cur:,} so'm" if cur else "Standart"
@@ -1633,7 +1680,7 @@ async def price_list(call: CallbackQuery):
     markup_prices = await db.get_all_markup_prices()
     text = "📋 <b>Barcha davlatlar narxlari:</b>\n\n"
     for code, info in sort_uz_first(filtered.items(), key_func=lambda x: float(x[1].get("price", 999))):
-        name      = info.get("name", code)
+        name      = clean_country_name(info.get("name", code))
         flag      = country_flag(code)
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
