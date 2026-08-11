@@ -918,8 +918,8 @@ async def build_countries_page(page: int):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([InlineKeyboardButton(
-            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
+        buttons.append([ib_button(
+            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     nav = []
@@ -930,8 +930,8 @@ async def build_countries_page(page: int):
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"countries_page:{page+1}"))
     buttons.append(nav)
     buttons.append([
-        InlineKeyboardButton(text="📈 TOP 10 davlatlar", callback_data="top10_countries"),
-        InlineKeyboardButton(text="🎊 Arzon raqamlar",   callback_data="cheap_countries"),
+        ib_button("TOP 10 davlatlar", "chart", callback_data="top10_countries"),
+        ib_button("Arzon raqamlar",   "fire",  callback_data="cheap_countries"),
     ])
     return buttons, total_pages
 
@@ -947,7 +947,7 @@ async def get_number_menu(msg: Message):
         await msg.answer("❌ Hozircha davlatlar ro'yxatini olib bo'lmadi. Iltimos, birozdan so'ng qayta urinib ko'ring.")
         return
     await msg.answer(
-        f"🌐 <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(0, total_pages)}</i>",
+        f"{E('globe')} <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(0, total_pages)}</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -962,7 +962,7 @@ async def countries_page_cb(call: CallbackQuery):
         return await call.answer("❌ Ro'yxatni yuklab bo'lmadi, birozdan so'ng qayta urinib ko'ring.", show_alert=True)
     try:
         await call.message.edit_text(
-            f"🌐 <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(page, total_pages)}</i>",
+            f"{E('globe')} <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(page, total_pages)}</i>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
     except Exception:
@@ -985,12 +985,12 @@ async def top10_countries(call: CallbackQuery):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([InlineKeyboardButton(
-            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
+        buttons.append([ib_button(
+            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
-    await call.message.edit_text("📈 <b>TOP 10 davlat (raqamlar soni bo'yicha):</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text(f"{E('chart')} <b>TOP 10 davlat (raqamlar soni bo'yicha):</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
 @router.callback_query(F.data == "cheap_countries")
@@ -1009,12 +1009,12 @@ async def cheap_countries(call: CallbackQuery):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([InlineKeyboardButton(
-            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
+        buttons.append([ib_button(
+            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
-    await call.message.edit_text("🎊 <b>Eng arzon raqamlar:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text(f"{E('fire')} <b>Eng arzon raqamlar:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
 @router.callback_query(F.data == "noop")
