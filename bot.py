@@ -267,15 +267,15 @@ def E(slug: str) -> str:
 # tashlaymiz (aks holda ikkitasi bir vaqtda chiqib qoladi). Bog'lanmagan
 # bo'lsa — oddiy fallback emojini matn boshiga qo'shib qo'yamiz.
 def kb_button(label: str, slug: str | None = None, style: str | None = None, **kwargs) -> "KeyboardButton":
-    """Pastdagi (reply) menyu tugmasi. DIQQAT: matn har doim fallback
-    emoji bilan barqaror qoladi (masalan '💳 Hisob to'ldirish'), chunki
-    bot xabarlarni aynan shu matn bo'yicha F.text == "..." orqali
-    aniqlaydi — agar Premium ulanganda matn o'zgarib ketsa, tugma
-    ishlamay qoladi. Shuning uchun icon_custom_emoji_id faqat QO'SHIMCHA
-    bezak sifatida qo'yiladi, matnni almashtirmaydi."""
+    """Pastdagi (reply) menyu tugmasi. Agar slug Premium emojiga bog'langan
+    bo'lsa, ikonka matndan OLDIN chiqadi va matndagi fallback emoji olib
+    tashlanadi (aks holda ikkalasi birga chiqib, ikki marta ko'rinadi).
+    Bog'lanmagan bo'lsa — oddiy fallback emoji matn boshida qoladi.
+    DIQQAT: shu sabab matn Premium yoqilgan-yoqilmaganiga qarab o'zgaradi —
+    handler'lar F.text == "..." emas, F.text.contains(label) orqali ushlanadi."""
     icon_id  = PREMIUM_EMOJI_CACHE.get(slug) if slug else None
     fallback = PREMIUM_EMOJI_SLUGS.get(slug, "") if slug else ""
-    text = f"{fallback} {label}".strip() if fallback else label
+    text = label if icon_id else (f"{fallback} {label}".strip() if fallback else label)
     return KeyboardButton(text=text, icon_custom_emoji_id=icon_id, style=style, **kwargs)
 
 def ib_button(label: str, slug: str | None = None, style: str | None = None, **kwargs) -> "InlineKeyboardButton":
@@ -535,7 +535,7 @@ async def pay_cancel_any(msg: Message, state: FSMContext):
     await msg.answer("❌ To'lov bekor qilindi.", reply_markup=build_main_menu())
 
 
-@router.message(F.text == "💳 Hisob to'ldirish")
+@router.message(F.text.contains("Hisob to'ldirish"))
 async def topup_menu(msg: Message, state: FSMContext):
     await msg.answer(
         TOPUP_INTRO + f"\n\n{E('warn')} Summani diqqat bilan tekshiring — botga tushgan mablag' qaytarilmaydi.\n"
@@ -870,7 +870,7 @@ async def phone_wrong(msg: Message):
     await msg.answer("⚠️ Iltimos, pastdagi «📲 Telefon raqamni yuborish» tugmasini bosing — matn kiritish shart emas.", reply_markup=phone_request_kb())
 
 # ─── HISOBIM ───────────────────────────────────────────────────
-@router.message(F.text == "💰 Hisobim")
+@router.message(F.text.contains("Hisobim"))
 async def show_balance(msg: Message):
     user = await db.get_user(msg.from_user.id)
     if not user:
@@ -935,7 +935,7 @@ async def build_countries_page(page: int):
     ])
     return buttons, total_pages
 
-@router.message(F.text == "📞 Nomer olish")
+@router.message(F.text.contains("Nomer olish"))
 async def get_number_menu(msg: Message):
     loading_msg = await msg.answer("⏳ Mavjud davlatlar ro'yxati yuklanmoqda...")
     buttons, total_pages = await build_countries_page(0)
@@ -1197,7 +1197,7 @@ async def get_code(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb)
 
 # ─── BUYURTMALARIM ─────────────────────────────────────────────
-@router.message(F.text == "🛒 Buyurtmalarim")
+@router.message(F.text.contains("Buyurtmalarim"))
 async def my_orders(msg: Message, override_user_id: int | None = None):
     user_id = override_user_id or msg.from_user.id
     orders = await db.get_purchases(user_id)
@@ -1231,7 +1231,7 @@ async def my_orders(msg: Message, override_user_id: int | None = None):
         await msg.answer(text, reply_markup=kb)
 
 # ─── PUL ISHLASH ───────────────────────────────────────────────
-@router.message(F.text == "💸 Pul ishlash")
+@router.message(F.text.contains("Pul ishlash"))
 async def earn_money(msg: Message, override_user_id: int | None = None):
     user_id = override_user_id or msg.from_user.id
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1284,7 +1284,7 @@ async def back_earn(call: CallbackQuery):
     await earn_money(call.message, override_user_id=call.from_user.id)
     await call.answer()
 
-@router.message(F.text == "📕 Qo'llanma")
+@router.message(F.text.contains("Qo'llanma"))
 async def guide_menu(msg: Message):
     text = (
         f"<b>{E('guide')} Botdan foydalanish qo'llanmasi</b>\n\n"
@@ -1298,7 +1298,7 @@ async def guide_menu(msg: Message):
     )
     await msg.answer(text)
 
-@router.message(F.text == "🆘 Qo'llab-quvvatlash")
+@router.message(F.text.contains("Qo'llab-quvvatlash"))
 async def support_menu(msg: Message):
     await msg.answer(
         f"{E('support')} <b>Qo'llab-quvvatlash</b>\n\n"
