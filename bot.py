@@ -353,15 +353,47 @@ def ib_button(label: str, slug: str | None = None, style: str | None = None, **k
     ikkilanib qolmaydi."""
     icon_id  = PREMIUM_EMOJI_CACHE.get(slug) if slug else None
     fallback = PREMIUM_EMOJI_SLUGS.get(slug, "") if slug else ""
-    text = label if icon_id else (f"{fallback} {label}".strip() if fallback else label)
-    if not text:
-        # Tugma matni bo'sh bo'lib qolmasligi kerak (Telegram buni rad etadi) —
-        # masalan faqat ikonkali strelka tugmalarida fallback emoji saqlanadi.
-        text = fallback or "•"
+    if icon_id:
+        # Ikonka allaqachon ko'rinadi — matnga qaytadan fallback emoji
+        # qo'shsak, ikkalasi birga (ikkilanib) chiqib qoladi. Shuning
+        # uchun matn bo'sh bo'lsa, faqat bo'sh joy qo'yamiz (Telegram
+        # butunlay bo'sh matnli tugmani rad etishi mumkin).
+        text = label if label else " "
+    else:
+        text = f"{fallback} {label}".strip() if fallback else label
+        if not text:
+            text = "•"
     return InlineKeyboardButton(text=text, icon_custom_emoji_id=icon_id, style=style, **kwargs)
 
 def now_tashkent() -> datetime:
     return datetime.now(TASHKENT_TZ)
+
+def parse_amount(text: str) -> int | None:
+    """Foydalanuvchi kiritgan summani ANIQ raqamga aylantiradi. Oddiy
+    str.isdigit() dan farqli o'laroq, bo'shliq (1 000), nuqta (1.000),
+    vergul yoki mobil klaviaturadan tushib qolishi mumkin bo'lgan
+    ko'rinmas belgilarni e'tiborsiz qoldirib, faqat raqamlarni oladi.
+    Shu bilan foydalanuvchi qanday formatda yozmasin, to'g'ri o'qiladi."""
+    if not text:
+        return None
+    cleaned = re.sub(r"[^\d]", "", text, flags=re.UNICODE)
+    if not cleaned:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+def parse_signed_amount(text: str) -> int | None:
+    """parse_amount bilan bir xil, lekin manfiy son (masalan balансdan
+    ayirish uchun '-5000') ni ham to'g'ri o'qiydi."""
+    if not text:
+        return None
+    negative = text.strip().startswith("-")
+    amount = parse_amount(text)
+    if amount is None:
+        return None
+    return -amount if negative else amount
 
 # ─── PREMIUM EMOJI — ADMIN BUYRUQLARI ───────────────────────────
 # /emojis        — barcha slug (nom) larning holatini ko'rsatadi
@@ -662,9 +694,9 @@ async def topup_auto_cb(call: CallbackQuery, state: FSMContext):
 
 @router.message(AutoPayStates.wait_amount)
 async def autopay_amount_received(msg: Message, state: FSMContext):
-    if not msg.text or not msg.text.strip().isdigit():
+    amount = parse_amount(msg.text)
+    if amount is None:
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun pastdagi tugmani bosing.")
-    amount = int(msg.text.strip())
     if not (1000 <= amount <= 10_000_000):
         await msg.answer(
             f"{E('cross')} Kiritilgan summa chegaradan tashqarida.\n"
@@ -741,11 +773,11 @@ async def cancel_auto_cb(call: CallbackQuery):
 
 @router.message(PayStates.wait_amount)
 async def pay_amount_received(msg: Message, state: FSMContext):
-    if not msg.text or not msg.text.strip().isdigit():
+    amount = parse_amount(msg.text)
+    if amount is None:
         await msg.answer("❌ Iltimos, faqat son (raqam) kiriting. Masalan: 50000", reply_markup=cancel_kb)
         return
 
-    amount = int(msg.text.strip())
     if not (1000 <= amount <= 10_000_000):
         await msg.answer(
             f"{E('cross')} Kiritilgan summa chegaradan tashqarida.\n"
@@ -1750,9 +1782,8 @@ async def adm_balance_uid(msg: Message, state: FSMContext):
 async def adm_balance_amount(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    try:
-        amount = int(msg.text)
-    except Exception:
+    amount = parse_signed_amount(msg.text)
+    if amount is None:
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun /cancel yozing.")
     data = await state.get_data()
     uid  = data['uid']
@@ -1951,9 +1982,9 @@ async def setprice_start(call: CallbackQuery, state: FSMContext):
 async def setprice_amount(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    if not msg.text or not msg.text.isdigit():
+    price = parse_amount(msg.text)
+    if price is None:
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun /cancel yozing.")
-    price = int(msg.text)
     if price < MIN_PRICE_SOM:
         return await msg.answer(f"❌ Narx kamida {MIN_PRICE_SOM:,} so'm bo'lishi kerak.")
     data  = await state.get_data()
@@ -2100,10 +2131,11 @@ async def set_autopay_offset_start(call: CallbackQuery, state: FSMContext):
 async def set_autopay_offset_apply(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    if not msg.text.strip().isdigit() or int(msg.text.strip()) < 1:
+    val = parse_amount(msg.text)
+    if val is None or val < 1:
         return await msg.answer("❌ Faqat musbat butun son kiriting.")
-    await db.set_setting("auto_pay_max_offset", msg.text.strip())
-    await msg.answer(f"{E('check')} Max band soni yangilandi: {msg.text.strip()}")
+    await db.set_setting("auto_pay_max_offset", str(val))
+    await msg.answer(f"{E('check')} Max band soni yangilandi: {val}")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2119,10 +2151,11 @@ async def set_autopay_expiry_start(call: CallbackQuery, state: FSMContext):
 async def set_autopay_expiry_apply(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    if not msg.text.strip().isdigit() or int(msg.text.strip()) < 1:
+    val = parse_amount(msg.text)
+    if val is None or val < 1:
         return await msg.answer("❌ Faqat musbat butun son kiriting.")
-    await db.set_setting("auto_pay_expiry_min", msg.text.strip())
-    await msg.answer(f"{E('check')} Kutish muddati yangilandi: {msg.text.strip()} daqiqa")
+    await db.set_setting("auto_pay_expiry_min", str(val))
+    await msg.answer(f"{E('check')} Kutish muddati yangilandi: {val} daqiqa")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2156,9 +2189,10 @@ async def set_daily_bonus_start(call: CallbackQuery, state: FSMContext):
 @admin_router.message(AdminSettingsState.wait_daily_bonus)
 async def set_daily_bonus_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
-    if not msg.text or not msg.text.isdigit(): return await msg.answer("❌ Faqat son kiriting!")
-    await db.set_setting("daily_bonus", msg.text)
-    await msg.answer(f"✅ Kunlik bonus {int(msg.text):,} so'm ga o'zgartirildi!")
+    val = parse_amount(msg.text)
+    if val is None: return await msg.answer("❌ Faqat son kiriting!")
+    await db.set_setting("daily_bonus", str(val))
+    await msg.answer(f"✅ Kunlik bonus {val:,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2172,9 +2206,10 @@ async def set_ref_bonus_start(call: CallbackQuery, state: FSMContext):
 @admin_router.message(AdminSettingsState.wait_referral_bonus)
 async def set_ref_bonus_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
-    if not msg.text or not msg.text.isdigit(): return await msg.answer("❌ Faqat son kiriting!")
-    await db.set_setting("referral_bonus", msg.text)
-    await msg.answer(f"✅ Referal bonus {int(msg.text):,} so'm ga o'zgartirildi!")
+    val = parse_amount(msg.text)
+    if val is None: return await msg.answer("❌ Faqat son kiriting!")
+    await db.set_setting("referral_bonus", str(val))
+    await msg.answer(f"✅ Referal bonus {val:,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
