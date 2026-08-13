@@ -108,6 +108,26 @@ class Database:
                     created_at  TIMESTAMP DEFAULT NOW()
                 )
             """)
+            # Avtomatik (HUMOcard orqali) to'lovlar. final_amount — foydalanuvchi
+            # aynan yuborishi kerak bo'lgan noyob summa (base_amount + band qilish
+            # uchun qo'shilgan farq). HUMOcard botidan mos summali xabar kelganda
+            # shu qatorga qarab avtomatik hisoblanadi.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS auto_payments (
+                    id           SERIAL PRIMARY KEY,
+                    user_id      BIGINT NOT NULL,
+                    base_amount  BIGINT NOT NULL,
+                    final_amount BIGINT NOT NULL,
+                    target_card  TEXT DEFAULT '',
+                    status       TEXT DEFAULT 'pending',
+                    card_used    TEXT DEFAULT '',
+                    created_at   TIMESTAMP DEFAULT NOW(),
+                    expires_at   TIMESTAMP NOT NULL,
+                    completed_at TIMESTAMP
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_pay_status ON auto_payments (status, final_amount)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_pay_user ON auto_payments (user_id)")
 
     # ─── USERS ─────────────────────────────────────────────────
     async def add_user(self, user_id: int, fullname: str, username: str, referrer_id=None):
@@ -384,3 +404,66 @@ class Database:
             return dict(row) if row else {
                 "topup_count": 0, "topup_total": 0, "purchase_count": 0, "purchase_total": 0
             }
+
+    # ─── AUTO PAYMENTS (HUMOcard) ───────────────────────────────
+    async def get_reserved_amounts(self, target_card: str = "") -> set:
+        """Berilgan karta uchun hozir 'pending' va muddati o'tmagan barcha
+        band qilingan summalar (kartalar orasida summa fazosi mustaqil)."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT final_amount FROM auto_payments "
+                "WHERE status = 'pending' AND expires_at > NOW() AND target_card = $1",
+                target_card
+            )
+            return {int(r["final_amount"]) for r in rows}
+
+    async def add_auto_payment(self, user_id: int, base_amount: int, final_amount: int,
+                                expires_at: datetime, target_card: str = "") -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO auto_payments (user_id, base_amount, final_amount, expires_at, target_card)
+                VALUES ($1, $2, $3, $4, $5) RETURNING id
+            """, user_id, base_amount, final_amount, expires_at, target_card)
+
+    async def get_auto_payment(self, payment_id: int):
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM auto_payments WHERE id = $1", payment_id)
+            return dict(row) if row else None
+
+    async def find_matching_auto_payment(self, amount: int, card_last: str = ""):
+        """HUMOcard'dan kelgan summa (va agar bilinsa karta oxiri) ga mos,
+        hali 'pending' bo'lgan so'rovni topadi va band qilib qaytaradi.
+        Karta mos kelishi ixtiyoriy — agar so'rovda karta belgilanmagan
+        (target_card bo'sh) bo'lsa, istalgan kartadan tushgan pul mos deb
+        hisoblanadi (eski, karta ko'rsatilmagan yozuvlar bilan moslik uchun)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE auto_payments SET status = 'matching'
+                WHERE id = (
+                    SELECT id FROM auto_payments
+                    WHERE final_amount = $1 AND status = 'pending' AND expires_at > NOW()
+                      AND (target_card = '' OR target_card = $2)
+                    ORDER BY created_at ASC LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+            """, amount, card_last)
+            return dict(row) if row else None
+
+    async def complete_auto_payment(self, payment_id: int, card_used: str = ""):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE auto_payments SET status = 'completed', completed_at = NOW(), card_used = $2
+                WHERE id = $1
+            """, payment_id, card_used)
+
+    async def cancel_auto_payment(self, payment_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE auto_payments SET status = 'expired' WHERE id = $1 AND status IN ('pending', 'matching')", payment_id)
+
+    async def expire_old_auto_payments(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE auto_payments SET status = 'expired'
+                WHERE status = 'pending' AND expires_at <= NOW()
+            """)
