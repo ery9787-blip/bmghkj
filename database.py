@@ -112,6 +112,9 @@ class Database:
             # aynan yuborishi kerak bo'lgan noyob summa (base_amount + band qilish
             # uchun qo'shilgan farq). HUMOcard botidan mos summali xabar kelganda
             # shu qatorga qarab avtomatik hisoblanadi.
+            # DIQQAT: TIMESTAMPTZ ishlatiladi (oddiy TIMESTAMP emas), chunki
+            # kodda vaqt zonali (Asia/Tashkent) sana yuboriladi — mos kelmasa
+            # PostgreSQL xatolik beradi.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS auto_payments (
                     id           SERIAL PRIMARY KEY,
@@ -121,11 +124,25 @@ class Database:
                     target_card  TEXT DEFAULT '',
                     status       TEXT DEFAULT 'pending',
                     card_used    TEXT DEFAULT '',
-                    created_at   TIMESTAMP DEFAULT NOW(),
-                    expires_at   TIMESTAMP NOT NULL,
-                    completed_at TIMESTAMP
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at   TIMESTAMPTZ NOT NULL,
+                    completed_at TIMESTAMPTZ
                 )
             """)
+            # Eski (birinchi versiyada yaratilgan) jadvallarda expires_at
+            # TIMESTAMPTZ emas, oddiy TIMESTAMP bo'lishi mumkin — shuni
+            # avtomatik tuzatib qo'yamiz, aks holda vaqt zonali sana
+            # yuborilganda INSERT xatolik berib, foydalanuvchiga hech qanday
+            # javob qaytmay "jim qolib" qoladi.
+            try:
+                await conn.execute("""
+                    ALTER TABLE auto_payments
+                        ALTER COLUMN expires_at TYPE TIMESTAMPTZ USING expires_at AT TIME ZONE 'Asia/Tashkent',
+                        ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'Asia/Tashkent',
+                        ALTER COLUMN completed_at TYPE TIMESTAMPTZ USING completed_at AT TIME ZONE 'Asia/Tashkent'
+                """)
+            except Exception:
+                pass
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_pay_status ON auto_payments (status, final_amount)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_auto_pay_user ON auto_payments (user_id)")
 
