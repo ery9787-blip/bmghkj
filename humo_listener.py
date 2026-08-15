@@ -47,11 +47,15 @@ def parse_humocard_message(text: str) -> dict | None:
     HUMOcard xabarini tahlil qiladi. Namuna:
 
         🎉 To'ldirish
-        + 100.000,00 UZS
+        ➕ 100.000,00 UZS
         📍 Alif uz h2h 075>Tosh
         🏦 HUMOCARD *2747
         🕐 20:16 27.07.2026
         💰 100.341,16 UZS
+
+    DIQQAT: summa oldida ODDIY "+" emas, "➕" (U+2795, Heavy Plus Sign)
+    emojisi keladi — bular butunlay boshqa belgilar! Xavfsizlik uchun
+    ikkalasini ham (va manfiy tomon uchun "➖"/"-" ni ham) qabul qilamiz.
 
     Qaytaradi: {"type": "deposit"|"withdraw", "amount": int, "card_last": str}
     yoki mos kelmasa None.
@@ -62,24 +66,28 @@ def parse_humocard_message(text: str) -> dict | None:
     if not lines:
         return None
 
-    header = lines[0]
-    is_deposit  = "to'ldirish" in header.lower() or "to‘ldirish" in header.lower()
-    is_withdraw = "to'lov" in header.lower() or "to‘lov" in header.lower()
+    header = lines[0].lower()
+    # "To'ldirish" — HUMOcard uchun, "Kartaga o'tkazma" — ba'zi UzCard/boshqa
+    # kartalar uchun ishlatiladigan muqobil sarlavha — ikkalasi ham pul KIRIM.
+    is_deposit = any(k in header for k in ["to'ldirish", "to‘ldirish", "kartaga o'tkazma", "kartaga o‘tkazma"])
+    is_withdraw = any(k in header for k in ["to'lov", "to‘lov"]) and not is_deposit
     if not (is_deposit or is_withdraw):
         return None
 
+    PLUS_CHARS  = ("+", "➕")
+    MINUS_CHARS = ("-", "➖")
     amount_line = next(
-        (l for l in lines if "uzs" in l.lower() and (l.strip().startswith("+") or l.strip().startswith("-"))),
+        (l for l in lines if "uzs" in l.lower() and l.strip().startswith(PLUS_CHARS + MINUS_CHARS)),
         None
     )
     if not amount_line:
         return None
 
-    m = re.search(r"([+-])\s*([\d\s.,]+)\s*UZS", amount_line, re.IGNORECASE)
+    m = re.search(r"[+➕\-➖]\s*([\d\s.,]+)\s*UZS", amount_line, re.IGNORECASE)
     if not m:
         return None
 
-    raw_num = m.group(2).strip()
+    raw_num = m.group(1).strip()
     # "100.000,00" -> butun qismi "100.000" -> "100000"
     integer_part = raw_num.split(",")[0].replace(".", "").replace(" ", "")
     try:
