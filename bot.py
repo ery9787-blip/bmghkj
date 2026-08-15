@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import random
 import aiohttp
 from datetime import datetime, date, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -18,7 +17,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-import humo_listener
 
 from database import Database
 
@@ -51,9 +49,6 @@ class PayStates(StatesGroup):
     wait_amount = State()
     wait_check  = State()
 
-class AutoPayStates(StatesGroup):
-    wait_amount = State()
-
 class BalanceChangeState(StatesGroup):
     wait_user_id = State()
     wait_amount  = State()
@@ -81,10 +76,6 @@ class AdminSettingsState(StatesGroup):
     wait_card_owner              = State()
     wait_exchange_rate           = State()
     wait_default_margin          = State()
-    wait_card2_number            = State()
-    wait_card2_owner             = State()
-    wait_autopay_offset          = State()
-    wait_autopay_expiry          = State()
 
 class EmojiState(StatesGroup):
     wait_forward = State()
@@ -159,74 +150,6 @@ async def calc_default_price(usd_price: float) -> int:
     margin = await get_default_margin()
     price  = int(float(usd_price) * rate * margin)
     return max(price, MIN_PRICE_SOM)
-
-# ─── AVTOMATIK TO'LOV (HUMOcard) ────────────────────────────────
-AUTO_PAY_MAX_OFFSET_DEFAULT   = 90    # tasodifiy oxirgi-2-raqam (10-99) uchun urinishlar soni
-AUTO_PAY_EXPIRY_MIN_DEFAULT   = 20    # necha daqiqa kutiladi
-
-async def is_auto_pay_enabled() -> bool:
-    return (await get_setting("auto_pay_enabled", "0")) == "1"
-
-async def get_auto_pay_max_offset() -> int:
-    return int(await get_setting("auto_pay_max_offset", AUTO_PAY_MAX_OFFSET_DEFAULT))
-
-async def get_auto_pay_expiry_min() -> int:
-    return int(await get_setting("auto_pay_expiry_min", AUTO_PAY_EXPIRY_MIN_DEFAULT))
-
-async def reserve_auto_amount(user_id: int, base_amount: int):
-    """
-    Berilgan summa uchun noyob "final_amount" band qiladi.
-
-    MUHIM: har doim (faqat to'qnashuvda emas) summaning oxirgi 2 raqamini
-    TASODIFIY qilib qo'yamiz (masalan 1000 -> 1000ga yaqin, lekin 1000
-    emas, masalan 1047). Bu ikki sabab uchun kerak:
-      1) Aynan "dumaloq" summalar (1000, 5000, 50000) haqiqiy hayotda
-         ENG KO'P uchraydigan summalar — agar band qilingan summa doim
-         dumaloq bo'lsa, botga aloqasi yo'q, tasodifan kelgan boshqa bir
-         pul o'tkazmasi ham xuddi shu summada bo'lib, noto'g'ri
-         foydalanuvchiga hisoblanib ketish xavfi yuqori.
-      2) Tasodifiy oxirgi 2 raqam — bir nechta odam bir xil summani
-         xohlasa ham, to'qnashish ehtimoli juda past (100 xil variant).
-
-    Avval 1-karta fazosida joy qidiradi, u to'lib qolsa — 2-kartaga o'tadi.
-    Qaytaradi: dict(payment_id, final_amount, offset, card_number,
-    card_owner, expires_at) yoki hech joy topilmasa None.
-    """
-    await db.expire_old_auto_payments()
-    max_attempts = await get_auto_pay_max_offset()
-    expiry_min   = await get_auto_pay_expiry_min()
-
-    card1_number = await get_setting("card_number", CARD_NUMBER)
-    card1_owner  = await get_setting("card_owner", CARD_OWNER)
-    card2_number = await get_setting("card2_number", "")
-    card2_owner  = await get_setting("card2_owner", "")
-
-    candidates = [(card1_number, card1_owner)]
-    if card2_number:
-        candidates.append((card2_number, card2_owner))
-
-    rounded_base = base_amount - (base_amount % 100)  # oxirgi 2 xonani olib tashlaymiz
-
-    for card_number, card_owner in candidates:
-        reserved = await db.get_reserved_amounts(target_card=card_number)
-        final_amount = None
-        for _ in range(max_attempts):
-            tail = random.randint(10, 99)
-            cand = rounded_base + tail
-            if cand not in reserved:
-                final_amount = cand
-                break
-        if final_amount is None:
-            continue  # bu kartada (juda kam ehtimol bilan) joy topilmadi, keyingisini sinaymiz
-        offset = final_amount - base_amount
-        expires_at = now_tashkent() + timedelta(minutes=expiry_min)
-        payment_id = await db.add_auto_payment(user_id, base_amount, final_amount, expires_at, target_card=card_number)
-        return {
-            "payment_id": payment_id, "final_amount": final_amount, "offset": offset,
-            "card_number": card_number, "card_owner": card_owner, "expires_at": expires_at,
-            "expiry_min": expiry_min,
-        }
-    return None  # ikkala karta ham to'lib qolgan — juda kam uchraydigan holat
 
 UZ_CODE = "UZ"
 
@@ -309,11 +232,6 @@ PREMIUM_EMOJI_SLUGS = {
     "one":       "1️⃣",
     "two":       "2️⃣",
     "cash":      "💸",
-    "arrow_l":   "⬅️",
-    "arrow_r":   "➡️",
-    "gear":      "⚙️",
-    "search":    "🔍",
-    "report":    "📅",
 }
 
 PREMIUM_EMOJI_CACHE: dict[str, str] = {}
@@ -367,47 +285,11 @@ def ib_button(label: str, slug: str | None = None, style: str | None = None, **k
     ikkilanib qolmaydi."""
     icon_id  = PREMIUM_EMOJI_CACHE.get(slug) if slug else None
     fallback = PREMIUM_EMOJI_SLUGS.get(slug, "") if slug else ""
-    if icon_id:
-        # Ikonka allaqachon ko'rinadi — matnga qaytadan fallback emoji
-        # qo'shsak, ikkalasi birga (ikkilanib) chiqib qoladi. Shuning
-        # uchun matn bo'sh bo'lsa, faqat bo'sh joy qo'yamiz (Telegram
-        # butunlay bo'sh matnli tugmani rad etishi mumkin).
-        text = label if label else " "
-    else:
-        text = f"{fallback} {label}".strip() if fallback else label
-        if not text:
-            text = "•"
+    text = label if icon_id else (f"{fallback} {label}".strip() if fallback else label)
     return InlineKeyboardButton(text=text, icon_custom_emoji_id=icon_id, style=style, **kwargs)
 
 def now_tashkent() -> datetime:
     return datetime.now(TASHKENT_TZ)
-
-def parse_amount(text: str) -> int | None:
-    """Foydalanuvchi kiritgan summani ANIQ raqamga aylantiradi. Oddiy
-    str.isdigit() dan farqli o'laroq, bo'shliq (1 000), nuqta (1.000),
-    vergul yoki mobil klaviaturadan tushib qolishi mumkin bo'lgan
-    ko'rinmas belgilarni e'tiborsiz qoldirib, faqat raqamlarni oladi.
-    Shu bilan foydalanuvchi qanday formatda yozmasin, to'g'ri o'qiladi."""
-    if not text:
-        return None
-    cleaned = re.sub(r"[^\d]", "", text, flags=re.UNICODE)
-    if not cleaned:
-        return None
-    try:
-        return int(cleaned)
-    except ValueError:
-        return None
-
-def parse_signed_amount(text: str) -> int | None:
-    """parse_amount bilan bir xil, lekin manfiy son (masalan balансdan
-    ayirish uchun '-5000') ni ham to'g'ri o'qiydi."""
-    if not text:
-        return None
-    negative = text.strip().startswith("-")
-    amount = parse_amount(text)
-    if amount is None:
-        return None
-    return -amount if negative else amount
 
 # ─── PREMIUM EMOJI — ADMIN BUYRUQLARI ───────────────────────────
 # /emojis        — barcha slug (nom) larning holatini ko'rsatadi
@@ -643,39 +525,18 @@ TOPUP_INTRO = (
     f"{E('point')} Maksimal: <b>10 000 000 so'm</b>"
 )
 
-@router.message(F.text.func(is_cancel_text), StateFilter(PayStates.wait_amount, PayStates.wait_check, AutoPayStates.wait_amount))
+@router.message(F.text.func(is_cancel_text), StateFilter(PayStates.wait_amount, PayStates.wait_check))
 async def pay_cancel_any(msg: Message, state: FSMContext):
     data   = await state.get_data()
     pay_id = data.get("pay_id")
     if pay_id:
         await db.delete_pending_payment(pay_id)
-    auto_id = data.get("auto_payment_id")
-    if auto_id:
-        await db.cancel_auto_payment(auto_id)
     await state.clear()
     await msg.answer("❌ To'lov bekor qilindi.", reply_markup=build_main_menu())
 
 
 @router.message(F.text.contains("Hisob to'ldirish"))
 async def topup_menu(msg: Message, state: FSMContext):
-    if await is_auto_pay_enabled():
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [ib_button("Avtomatik (tezkor)", "rocket", style="success", callback_data="topup_auto")],
-            [ib_button("Qo'lda (chek orqali)", "camera", style="primary", callback_data="topup_manual")],
-        ])
-        await msg.answer(
-            f"{E('card')} <b>Hisob to'ldirish</b>\n\n"
-            f"{E('rocket')} <b>Avtomatik</b> — kartaga pul o'tkazasiz, bot xabarni o'zi ko'rib, "
-            f"balansingizni bir necha soniyada to'ldiradi. Chek yuborish shart emas!\n\n"
-            f"{E('camera')} <b>Qo'lda</b> — pul o'tkazib, chekni yuborasiz, admin tasdiqlaydi.\n\n"
-            f"{E('point')} Qaysi usulni tanlaysiz?",
-            reply_markup=kb
-        )
-        return
-    await topup_manual_start(msg, state)
-
-
-async def topup_manual_start(msg: Message, state: FSMContext):
     await msg.answer(
         TOPUP_INTRO + f"\n\n{E('warn')} Summani diqqat bilan tekshiring — botga tushgan mablag' qaytarilmaydi.\n"
         "Fikringizdan qaytsangiz, pastdagi «❌ Bekor qilish» tugmasini bosing.",
@@ -684,115 +545,13 @@ async def topup_manual_start(msg: Message, state: FSMContext):
     await state.set_state(PayStates.wait_amount)
 
 
-@router.callback_query(F.data == "topup_manual")
-async def topup_manual_cb(call: CallbackQuery, state: FSMContext):
-    await call.message.delete()
-    await topup_manual_start(call.message, state)
-    await call.answer()
-
-
-@router.callback_query(F.data == "topup_auto")
-async def topup_auto_cb(call: CallbackQuery, state: FSMContext):
-    await call.message.delete()
-    max_amount_hint = ""
-    await call.message.answer(
-        f"{E('rocket')} <b>Avtomatik to'lov</b>\n\n"
-        f"Qancha to'lov qilmoqchi ekaningizni son ko'rinishida yozing (masalan: <code>50000</code>).\n\n"
-        f"{E('point')} Minimal: <b>1 000 so'm</b>\n"
-        f"{E('point')} Maksimal: <b>10 000 000 so'm</b>",
-        reply_markup=cancel_kb
-    )
-    await state.set_state(AutoPayStates.wait_amount)
-    await call.answer()
-
-
-@router.message(AutoPayStates.wait_amount)
-async def autopay_amount_received(msg: Message, state: FSMContext):
-    amount = parse_amount(msg.text)
-    if amount is None:
-        return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun pastdagi tugmani bosing.")
-    if not (1000 <= amount <= 10_000_000):
-        await msg.answer(
-            f"{E('cross')} Kiritilgan summa chegaradan tashqarida.\n"
-            f"{E('point')} Minimal: <b>1 000 so'm</b>\n"
-            f"{E('point')} Maksimal: <b>10 000 000 so'm</b>"
-        )
-        return
-
-    reservation = await reserve_auto_amount(msg.from_user.id, amount)
-    if not reservation:
-        await msg.answer(
-            f"{E('warn')} Hozir juda ko'p odam to'lov qilmoqchi — barcha kartalarda joy tugagan.\n"
-            f"Birozdan so'ng qayta urinib ko'ring, yoki «✍️ Qo'lda» usulidan foydalaning.",
-            reply_markup=build_main_menu()
-        )
-        await state.clear()
-        return
-
-    final_amount = reservation["final_amount"]
-    offset       = reservation["offset"]
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ib_button("Bekor qilish", "cross", style="danger", callback_data=f"cancel_auto:{reservation['payment_id']}")],
-    ])
-    await state.update_data(auto_payment_id=reservation["payment_id"])
-
-    offset_note = ""
-    if offset != 0:
-        sign = "+" if offset > 0 else ""
-        offset_note = (
-            f"\n{E('warn')} <b>Diqqat!</b> Xavfsizlik uchun summangizga tasodifiy son qo'shildi — "
-            f"aniq <b>{final_amount:,} so'm</b> yuborishingiz kerak ({sign}{offset:,} so'm farq bilan) — "
-            f"faqat shu ANIQ summa avtomatik aniqlanadi!\n"
-        )
-
-    await msg.answer(
-        f"{E('receipt')} <b>To'lov ma'lumotlari</b>\n\n"
-        f"{E('money')} Yuboriladigan ANIQ summa: <b>{final_amount:,} so'm</b>\n"
-        f"{E('card')} Karta raqami: <code>{reservation['card_number']}</code>\n"
-        f"{E('profile')} Karta egasi: <b>{reservation['card_owner']}</b>\n"
-        f"{offset_note}\n"
-        f"{E('rocket')} Pul kartaga tushishi bilan, balansingiz {reservation['expiry_min']} daqiqa ichida "
-        f"AVTOMATIK to'ldiriladi — chek yuborish shart emas!\n\n"
-        f"{E('hourglass')} <i>{reservation['expiry_min']} daqiqa ichida pul tushmasa, bu band bekor bo'ladi.</i>",
-        reply_markup=kb
-    )
-    await state.clear()
-    asyncio.create_task(_autopay_timeout(reservation["payment_id"], msg.from_user.id, final_amount, reservation["expiry_min"]))
-
-
-async def _autopay_timeout(payment_id: int, user_id: int, final_amount: int, expiry_min: int):
-    await asyncio.sleep(expiry_min * 60)
-    payment = await db.get_auto_payment(payment_id)
-    if payment and payment["status"] == "pending":
-        await db.cancel_auto_payment(payment_id)
-        try:
-            await bot.send_message(
-                user_id,
-                f"{E('hourglass')} <b>{final_amount:,} so'm</b>lik avtomatik to'lov muddati tugadi, bekor qilindi.\n"
-                f"Qayta urinish uchun «{E('card')} Hisob to'ldirish» tugmasini bosing.",
-                reply_markup=build_main_menu()
-            )
-        except Exception:
-            pass
-
-
-@router.callback_query(F.data.startswith("cancel_auto:"))
-async def cancel_auto_cb(call: CallbackQuery):
-    payment_id = int(call.data.split(":")[1])
-    payment = await db.get_auto_payment(payment_id)
-    if payment and payment["user_id"] == call.from_user.id and payment["status"] == "pending":
-        await db.cancel_auto_payment(payment_id)
-        await call.message.edit_text(f"{E('cross')} To'lov bekor qilindi.")
-    await call.answer()
-
-
 @router.message(PayStates.wait_amount)
 async def pay_amount_received(msg: Message, state: FSMContext):
-    amount = parse_amount(msg.text)
-    if amount is None:
+    if not msg.text or not msg.text.strip().isdigit():
         await msg.answer("❌ Iltimos, faqat son (raqam) kiriting. Masalan: 50000", reply_markup=cancel_kb)
         return
 
+    amount = int(msg.text.strip())
     if not (1000 <= amount <= 10_000_000):
         await msg.answer(
             f"{E('cross')} Kiritilgan summa chegaradan tashqarida.\n"
@@ -1136,7 +895,8 @@ async def show_balance(msg: Message):
 
 @router.callback_query(F.data == "goto_topup")
 async def goto_topup(call: CallbackQuery, state: FSMContext):
-    await topup_menu(call.message, state)
+    await call.message.answer(TOPUP_INTRO, reply_markup=cancel_kb)
+    await state.set_state(PayStates.wait_amount)
     await call.answer()
 
 # ─── NOMER OLISH ───────────────────────────────────────────────
@@ -1158,20 +918,20 @@ async def build_countries_page(page: int):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([ib_button(
-            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     nav = []
     if page > 0:
-        nav.append(ib_button("", "arrow_l", style="primary", callback_data=f"countries_page:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"countries_page:{page-1}"))
     nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
     if end < len(sorted_countries):
-        nav.append(ib_button("", "arrow_r", style="primary", callback_data=f"countries_page:{page+1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"countries_page:{page+1}"))
     buttons.append(nav)
     buttons.append([
-        ib_button("TOP 10 davlatlar", "chart", callback_data="top10_countries"),
-        ib_button("Arzon raqamlar",   "fire",  callback_data="cheap_countries"),
+        InlineKeyboardButton(text="📈 TOP 10 davlatlar", callback_data="top10_countries"),
+        InlineKeyboardButton(text="🎊 Arzon raqamlar",   callback_data="cheap_countries"),
     ])
     return buttons, total_pages
 
@@ -1187,7 +947,7 @@ async def get_number_menu(msg: Message):
         await msg.answer("❌ Hozircha davlatlar ro'yxatini olib bo'lmadi. Iltimos, birozdan so'ng qayta urinib ko'ring.")
         return
     await msg.answer(
-        f"{E('globe')} <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(0, total_pages)}</i>",
+        f"🌐 <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(0, total_pages)}</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -1202,7 +962,7 @@ async def countries_page_cb(call: CallbackQuery):
         return await call.answer("❌ Ro'yxatni yuklab bo'lmadi, birozdan so'ng qayta urinib ko'ring.", show_alert=True)
     try:
         await call.message.edit_text(
-            f"{E('globe')} <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(page, total_pages)}</i>",
+            f"🌐 <b>Mavjud davlatlar ro'yxati:</b>\n<i>{page_label(page, total_pages)}</i>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
     except Exception:
@@ -1225,12 +985,12 @@ async def top10_countries(call: CallbackQuery):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([ib_button(
-            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
-    await call.message.edit_text(f"{E('chart')} <b>TOP 10 davlat (raqamlar soni bo'yicha):</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text("📈 <b>TOP 10 davlat (raqamlar soni bo'yicha):</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
 @router.callback_query(F.data == "cheap_countries")
@@ -1249,12 +1009,12 @@ async def cheap_countries(call: CallbackQuery):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         flag      = country_flag(code)
-        buttons.append([ib_button(
-            f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
     buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
-    await call.message.edit_text(f"{E('fire')} <b>Eng arzon raqamlar:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text("🎊 <b>Eng arzon raqamlar:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
 @router.callback_query(F.data == "noop")
@@ -1572,19 +1332,18 @@ async def show_admin_panel(target):
         f"🔧 Ta'mirlash rejimi: <b>{'🔴 YOQILGAN' if maintenance else '🟢 O`CHIRILGAN'}</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ib_button("Statistika", "chart", style="primary", callback_data="adm_stats"),
-         ib_button("Foydalanuvchilar", "referral", callback_data="adm_users")],
-        [ib_button("Kunlik hisobot", "report", callback_data="adm_daily_report"),
-         ib_button("Foydalanuvchi profili", "profile", callback_data="adm_user_profile")],
-        [ib_button("Balans o'zgartirish", "money", style="success", callback_data="adm_balance"),
-         ib_button("Narx sozlash", "card", style="primary", callback_data="adm_prices")],
-        [ib_button("Raqam qidirish", "search", callback_data="adm_search"),
-         ib_button("Xabar yuborish", "bell", style="primary", callback_data="adm_broadcast")],
-        [ib_button("Bot sozlamalari", "gear", callback_data="adm_settings"),
-         ib_button("Yangilash", "sparkle", callback_data="adm_refresh")],
-        [ib_button(
-            ("Ta'mirlashni o'chirish" if maintenance else "Ta'mirlash rejimini yoqish"), "warn",
-            style=("success" if maintenance else "danger"),
+        [InlineKeyboardButton(text="📊 Statistika",           callback_data="adm_stats"),
+         InlineKeyboardButton(text="👥 Foydalanuvchilar",     callback_data="adm_users")],
+        [InlineKeyboardButton(text="📅 Kunlik hisobot",       callback_data="adm_daily_report"),
+         InlineKeyboardButton(text="🔍 Foydalanuvchi profili", callback_data="adm_user_profile")],
+        [InlineKeyboardButton(text="➕➖ Balans o'zgartirish", callback_data="adm_balance"),
+         InlineKeyboardButton(text="💵 Narx sozlash",         callback_data="adm_prices")],
+        [InlineKeyboardButton(text="📞 Raqam qidirish",       callback_data="adm_search"),
+         InlineKeyboardButton(text="📣 Xabar yuborish",       callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="⚙️ Bot sozlamalari",      callback_data="adm_settings"),
+         InlineKeyboardButton(text="🔄 Yangilash",            callback_data="adm_refresh")],
+        [InlineKeyboardButton(
+            text=("🔧 Ta'mirlashni o'chirish" if maintenance else "🔧 Ta'mirlash rejimini yoqish"),
             callback_data="adm_toggle_maintenance"
         )],
     ])
@@ -1614,9 +1373,7 @@ async def admin_cmd(msg: Message):
         AdminSettingsState.wait_orders_channel_id, AdminSettingsState.wait_orders_channel_username,
         AdminSettingsState.wait_card_number, AdminSettingsState.wait_card_owner,
         AdminSettingsState.wait_exchange_rate, AdminSettingsState.wait_default_margin,
-        EmojiState.wait_forward, AutoPayStates.wait_amount,
-        AdminSettingsState.wait_card2_number, AdminSettingsState.wait_card2_owner,
-        AdminSettingsState.wait_autopay_offset, AdminSettingsState.wait_autopay_expiry,
+        EmojiState.wait_forward,
     )
 )
 async def admin_cancel_any(msg: Message, state: FSMContext):
@@ -1797,8 +1554,9 @@ async def adm_balance_uid(msg: Message, state: FSMContext):
 async def adm_balance_amount(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    amount = parse_signed_amount(msg.text)
-    if amount is None:
+    try:
+        amount = int(msg.text)
+    except Exception:
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun /cancel yozing.")
     data = await state.get_data()
     uid  = data['uid']
@@ -1828,12 +1586,12 @@ async def adm_prices(call: CallbackQuery):
         f"bir xil ishlaydi, shu bilan foiz o'zgartirish hammasiga bir xilda ta'sir qiladi.</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ib_button("Bitta davlat narxini o'zgartirish",    "card",    callback_data="price_single")],
-        [ib_button("Barcha narxlarni % bilan o'zgartirish", "chart",  style="primary", callback_data="price_bulk")],
-        [ib_button("Barcha narxlarni ko'rish",              "report", callback_data="price_list")],
-        [ib_button("Kursni o'zgartirish",                   "money",  style="success", callback_data="set_exchange_rate")],
-        [ib_button("Marginni o'zgartirish",                 "sparkle", callback_data="set_default_margin")],
-        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")],
+        [InlineKeyboardButton(text="✏️ Bitta davlat narxini o'zgartirish",    callback_data="price_single")],
+        [InlineKeyboardButton(text="📊 Barcha narxlarni % bilan o'zgartirish", callback_data="price_bulk")],
+        [InlineKeyboardButton(text="📋 Barcha narxlarni ko'rish",              callback_data="price_list")],
+        [InlineKeyboardButton(text="💱 Kursni o'zgartirish",                   callback_data="set_exchange_rate")],
+        [InlineKeyboardButton(text="✨ Marginni o'zgartirish",                 callback_data="set_default_margin")],
+        [InlineKeyboardButton(text="⬅️ Orqaga",                               callback_data="adm_refresh")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
@@ -1997,9 +1755,9 @@ async def setprice_start(call: CallbackQuery, state: FSMContext):
 async def setprice_amount(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
-    price = parse_amount(msg.text)
-    if price is None:
+    if not msg.text or not msg.text.isdigit():
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun /cancel yozing.")
+    price = int(msg.text)
     if price < MIN_PRICE_SOM:
         return await msg.answer(f"❌ Narx kamida {MIN_PRICE_SOM:,} so'm bo'lishi kerak.")
     data  = await state.get_data()
@@ -2021,8 +1779,6 @@ async def adm_settings(call: CallbackQuery):
     card            = await get_setting("card_number", CARD_NUMBER)
     owner           = await get_setting("card_owner", CARD_OWNER)
     bound_count = sum(1 for v in PREMIUM_EMOJI_CACHE.values() if v)
-    auto_on = await is_auto_pay_enabled()
-    auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
     text = (
         f"⚙️ <b>Bot sozlamalari</b>\n\n"
         f"🎁 Kunlik bonus: <b>{daily_bonus_val} so'm</b>\n"
@@ -2031,8 +1787,7 @@ async def adm_settings(call: CallbackQuery):
         f"📦 Buyurtmalar kanali: <b>@{orders_ch_un or 'Sozlanmagan'}</b>\n"
         f"💳 Karta raqami: <b>{card}</b>\n"
         f"👤 Karta egasi: <b>{owner}</b>\n"
-        f"{E('sparkle')} Premium emoji: <b>{bound_count}/{len(PREMIUM_EMOJI_SLUGS)}</b> bog'langan\n"
-        f"{E('rocket')} Avtomatik to'lov (HUMOcard): <b>{auto_status_text}</b>"
+        f"{E('sparkle')} Premium emoji: <b>{bound_count}/{len(PREMIUM_EMOJI_SLUGS)}</b> bog'langan"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Kunlik bonusni o'zgartirish",   callback_data="set_daily_bonus")],
@@ -2042,138 +1797,10 @@ async def adm_settings(call: CallbackQuery):
         [InlineKeyboardButton(text="💳 Karta raqamini o'zgartirish",   callback_data="set_card_number")],
         [InlineKeyboardButton(text="👤 Karta egasini o'zgartirish",    callback_data="set_card_owner")],
         [InlineKeyboardButton(text="✨ Premium emoji sozlash",         callback_data="adm_emojis")],
-        [InlineKeyboardButton(text="⚡ Avtomatik to'lov sozlamalari",  callback_data="adm_autopay")],
         [InlineKeyboardButton(text="⬅️ Orqaga",                       callback_data="adm_refresh")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
-
-@admin_router.callback_query(F.data == "adm_autopay")
-async def adm_autopay_cb(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return
-    auto_on      = await is_auto_pay_enabled()
-    card2_number = await get_setting("card2_number", "")
-    card2_owner  = await get_setting("card2_owner", "")
-    max_offset   = await get_auto_pay_max_offset()
-    expiry_min   = await get_auto_pay_expiry_min()
-    listener_status = "✅ Ishga tushirilgan" if humo_listener.HUMO_ENABLED else "❌ Sozlanmagan (.env ni tekshiring)"
-    auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
-    text = (
-        f"⚡ <b>Avtomatik to'lov sozlamalari (HUMOcard)</b>\n\n"
-        f"🔌 Tinglovchi holati: <b>{listener_status}</b>\n"
-        f"🔘 Avtomatik rejim: <b>{auto_status_text}</b>\n"
-        f"💳 2-karta: <b>{card2_number or 'Sozlanmagan'}</b>"
-        f"{f' ({card2_owner})' if card2_owner else ''}\n"
-        f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
-        f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
-        f"<i>Diqqat: HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING .env faylida "
-        f"sozlanmagan bo'lsa, avtomatik rejim yoqilgan bo'lsa ham ishlamaydi — "
-        f"foydalanuvchilarga faqat 'Qo'lda' usuli ko'rinadi.</i>"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ib_button(("O'chirish" if auto_on else "Yoqish"), "rocket",
-                    style=("danger" if auto_on else "success"), callback_data="toggle_autopay")],
-        [ib_button("2-karta raqamini sozlash", "card", callback_data="set_card2_number")],
-        [ib_button("2-karta egasini sozlash", "profile", callback_data="set_card2_owner")],
-        [ib_button("Urinishlar sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
-        [ib_button("Kutish muddatini o'zgartirish", "clock", callback_data="set_autopay_expiry")],
-        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb)
-    await call.answer()
-
-@admin_router.callback_query(F.data == "toggle_autopay")
-async def toggle_autopay_cb(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID:
-        return
-    new_val = "0" if await is_auto_pay_enabled() else "1"
-    if new_val == "1" and not humo_listener.HUMO_ENABLED:
-        await call.answer(
-            "❌ Avval .env faylida HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING sozlang!",
-            show_alert=True
-        )
-        return
-    await db.set_setting("auto_pay_enabled", new_val)
-    await adm_autopay_cb(call)
-
-@admin_router.callback_query(F.data == "set_card2_number")
-async def set_card2_number_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        return
-    await call.message.edit_text("💳 2-karta raqamini kiriting (masalan: 8600123456789012):")
-    await state.set_state(AdminSettingsState.wait_card2_number)
-    await call.answer()
-
-@admin_router.message(AdminSettingsState.wait_card2_number)
-async def set_card2_number_apply(msg: Message, state: FSMContext):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    await db.set_setting("card2_number", msg.text.strip())
-    await msg.answer(f"{E('check')} 2-karta raqami saqlandi.")
-    await state.clear()
-    await show_admin_panel(msg)
-
-@admin_router.callback_query(F.data == "set_card2_owner")
-async def set_card2_owner_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        return
-    await call.message.edit_text("👤 2-karta egasining ismini kiriting:")
-    await state.set_state(AdminSettingsState.wait_card2_owner)
-    await call.answer()
-
-@admin_router.message(AdminSettingsState.wait_card2_owner)
-async def set_card2_owner_apply(msg: Message, state: FSMContext):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    await db.set_setting("card2_owner", msg.text.strip())
-    await msg.answer(f"{E('check')} 2-karta egasi saqlandi.")
-    await state.clear()
-    await show_admin_panel(msg)
-
-@admin_router.callback_query(F.data == "set_autopay_offset")
-async def set_autopay_offset_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        return
-    await call.message.edit_text(
-        "🔢 Har bir summa uchun tasodifiy oxirgi 2 raqamni topishga nechta "
-        "urinish qilinsin (tavsiya: 90 — bu 10 dan 99 gacha bo'lgan barcha "
-        "variantlarni to'liq qamrab oladi):"
-    )
-    await state.set_state(AdminSettingsState.wait_autopay_offset)
-    await call.answer()
-
-@admin_router.message(AdminSettingsState.wait_autopay_offset)
-async def set_autopay_offset_apply(msg: Message, state: FSMContext):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    val = parse_amount(msg.text)
-    if val is None or val < 1:
-        return await msg.answer("❌ Faqat musbat butun son kiriting.")
-    await db.set_setting("auto_pay_max_offset", str(val))
-    await msg.answer(f"{E('check')} Urinishlar soni yangilandi: {val}")
-    await state.clear()
-    await show_admin_panel(msg)
-
-@admin_router.callback_query(F.data == "set_autopay_expiry")
-async def set_autopay_expiry_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID:
-        return
-    await call.message.edit_text("⏰ Necha daqiqa kutilishini kiriting (tavsiya: 15-30):")
-    await state.set_state(AdminSettingsState.wait_autopay_expiry)
-    await call.answer()
-
-@admin_router.message(AdminSettingsState.wait_autopay_expiry)
-async def set_autopay_expiry_apply(msg: Message, state: FSMContext):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    val = parse_amount(msg.text)
-    if val is None or val < 1:
-        return await msg.answer("❌ Faqat musbat butun son kiriting.")
-    await db.set_setting("auto_pay_expiry_min", str(val))
-    await msg.answer(f"{E('check')} Kutish muddati yangilandi: {val} daqiqa")
-    await state.clear()
-    await show_admin_panel(msg)
 
 @admin_router.callback_query(F.data == "adm_emojis")
 async def adm_emojis_cb(call: CallbackQuery):
@@ -2205,10 +1832,9 @@ async def set_daily_bonus_start(call: CallbackQuery, state: FSMContext):
 @admin_router.message(AdminSettingsState.wait_daily_bonus)
 async def set_daily_bonus_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
-    val = parse_amount(msg.text)
-    if val is None: return await msg.answer("❌ Faqat son kiriting!")
-    await db.set_setting("daily_bonus", str(val))
-    await msg.answer(f"✅ Kunlik bonus {val:,} so'm ga o'zgartirildi!")
+    if not msg.text or not msg.text.isdigit(): return await msg.answer("❌ Faqat son kiriting!")
+    await db.set_setting("daily_bonus", msg.text)
+    await msg.answer(f"✅ Kunlik bonus {int(msg.text):,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2222,10 +1848,9 @@ async def set_ref_bonus_start(call: CallbackQuery, state: FSMContext):
 @admin_router.message(AdminSettingsState.wait_referral_bonus)
 async def set_ref_bonus_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
-    val = parse_amount(msg.text)
-    if val is None: return await msg.answer("❌ Faqat son kiriting!")
-    await db.set_setting("referral_bonus", str(val))
-    await msg.answer(f"✅ Referal bonus {val:,} so'm ga o'zgartirildi!")
+    if not msg.text or not msg.text.isdigit(): return await msg.answer("❌ Faqat son kiriting!")
+    await db.set_setting("referral_bonus", msg.text)
+    await msg.answer(f"✅ Referal bonus {int(msg.text):,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2374,11 +1999,6 @@ async def main():
     dp.include_router(admin_router)
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
-    if humo_listener.HUMO_ENABLED:
-        asyncio.create_task(humo_listener.start_humo_listener(db, bot, ADMIN_ID, E))
-        print("✅ HUMOcard avtomatik to'lov tinglovchisi ishga tushirildi ✅")
-    else:
-        print("ℹ️ HUMOcard sozlanmagan — faqat qo'lda to'lov tizimi ishlaydi (.env да HUMO_* qo'shsangiz avtomatik yoqiladi)")
     print("✅ Bot ishga tushdi! PostgreSQL ulandi ✅")
     await dp.start_polling(bot)
 
