@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import random
 import aiohttp
 from datetime import datetime, date, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -160,7 +161,7 @@ async def calc_default_price(usd_price: float) -> int:
     return max(price, MIN_PRICE_SOM)
 
 # ─── AVTOMATIK TO'LOV (HUMOcard) ────────────────────────────────
-AUTO_PAY_MAX_OFFSET_DEFAULT   = 999   # bitta summaga nechtagacha "band" qo'yish mumkin
+AUTO_PAY_MAX_OFFSET_DEFAULT   = 90    # tasodifiy oxirgi-2-raqam (10-99) uchun urinishlar soni
 AUTO_PAY_EXPIRY_MIN_DEFAULT   = 20    # necha daqiqa kutiladi
 
 async def is_auto_pay_enabled() -> bool:
@@ -174,14 +175,26 @@ async def get_auto_pay_expiry_min() -> int:
 
 async def reserve_auto_amount(user_id: int, base_amount: int):
     """
-    Berilgan summa uchun noyob "final_amount" band qiladi. Avval 1-karta
-    fazosida bo'sh joy qidiradi, u to'lib qolsa — 2-kartaga o'tadi.
+    Berilgan summa uchun noyob "final_amount" band qiladi.
+
+    MUHIM: har doim (faqat to'qnashuvda emas) summaning oxirgi 2 raqamini
+    TASODIFIY qilib qo'yamiz (masalan 1000 -> 1000ga yaqin, lekin 1000
+    emas, masalan 1047). Bu ikki sabab uchun kerak:
+      1) Aynan "dumaloq" summalar (1000, 5000, 50000) haqiqiy hayotda
+         ENG KO'P uchraydigan summalar — agar band qilingan summa doim
+         dumaloq bo'lsa, botga aloqasi yo'q, tasodifan kelgan boshqa bir
+         pul o'tkazmasi ham xuddi shu summada bo'lib, noto'g'ri
+         foydalanuvchiga hisoblanib ketish xavfi yuqori.
+      2) Tasodifiy oxirgi 2 raqam — bir nechta odam bir xil summani
+         xohlasa ham, to'qnashish ehtimoli juda past (100 xil variant).
+
+    Avval 1-karta fazosida joy qidiradi, u to'lib qolsa — 2-kartaga o'tadi.
     Qaytaradi: dict(payment_id, final_amount, offset, card_number,
     card_owner, expires_at) yoki hech joy topilmasa None.
     """
     await db.expire_old_auto_payments()
-    max_offset = await get_auto_pay_max_offset()
-    expiry_min = await get_auto_pay_expiry_min()
+    max_attempts = await get_auto_pay_max_offset()
+    expiry_min   = await get_auto_pay_expiry_min()
 
     card1_number = await get_setting("card_number", CARD_NUMBER)
     card1_owner  = await get_setting("card_owner", CARD_OWNER)
@@ -192,19 +205,20 @@ async def reserve_auto_amount(user_id: int, base_amount: int):
     if card2_number:
         candidates.append((card2_number, card2_owner))
 
+    rounded_base = base_amount - (base_amount % 100)  # oxirgi 2 xonani olib tashlaymiz
+
     for card_number, card_owner in candidates:
         reserved = await db.get_reserved_amounts(target_card=card_number)
-        if base_amount not in reserved:
-            final_amount, offset = base_amount, 0
-        else:
-            final_amount, offset = None, None
-            for off in range(1, max_offset + 1):
-                cand = base_amount + off
-                if cand not in reserved:
-                    final_amount, offset = cand, off
-                    break
+        final_amount = None
+        for _ in range(max_attempts):
+            tail = random.randint(10, 99)
+            cand = rounded_base + tail
+            if cand not in reserved:
+                final_amount = cand
+                break
         if final_amount is None:
-            continue  # bu kartada joy yo'q, keyingisini sinaymiz
+            continue  # bu kartada (juda kam ehtimol bilan) joy topilmadi, keyingisini sinaymiz
+        offset = final_amount - base_amount
         expires_at = now_tashkent() + timedelta(minutes=expiry_min)
         payment_id = await db.add_auto_payment(user_id, base_amount, final_amount, expires_at, target_card=card_number)
         return {
@@ -723,10 +737,11 @@ async def autopay_amount_received(msg: Message, state: FSMContext):
     await state.update_data(auto_payment_id=reservation["payment_id"])
 
     offset_note = ""
-    if offset > 0:
+    if offset != 0:
+        sign = "+" if offset > 0 else ""
         offset_note = (
-            f"\n{E('warn')} <b>Diqqat!</b> {amount:,} so'm hozir band bo'lgani uchun, "
-            f"aniq <b>{final_amount:,} so'm</b> yuborishingiz kerak (ya'ni +{offset:,} so'm ko'proq) — "
+            f"\n{E('warn')} <b>Diqqat!</b> Xavfsizlik uchun summangizga tasodifiy son qo'shildi — "
+            f"aniq <b>{final_amount:,} so'm</b> yuborishingiz kerak ({sign}{offset:,} so'm farq bilan) — "
             f"faqat shu ANIQ summa avtomatik aniqlanadi!\n"
         )
 
@@ -2050,7 +2065,7 @@ async def adm_autopay_cb(call: CallbackQuery):
         f"🔘 Avtomatik rejim: <b>{auto_status_text}</b>\n"
         f"💳 2-karta: <b>{card2_number or 'Sozlanmagan'}</b>"
         f"{f' ({card2_owner})' if card2_owner else ''}\n"
-        f"🔢 Max band (offset): <b>{max_offset}</b>\n"
+        f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
         f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
         f"<i>Diqqat: HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING .env faylida "
         f"sozlanmagan bo'lsa, avtomatik rejim yoqilgan bo'lsa ham ishlamaydi — "
@@ -2061,7 +2076,7 @@ async def adm_autopay_cb(call: CallbackQuery):
                     style=("danger" if auto_on else "success"), callback_data="toggle_autopay")],
         [ib_button("2-karta raqamini sozlash", "card", callback_data="set_card2_number")],
         [ib_button("2-karta egasini sozlash", "profile", callback_data="set_card2_owner")],
-        [ib_button("Max band sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
+        [ib_button("Urinishlar sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
         [ib_button("Kutish muddatini o'zgartirish", "clock", callback_data="set_autopay_expiry")],
         [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")],
     ])
@@ -2121,8 +2136,9 @@ async def set_autopay_offset_start(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID:
         return
     await call.message.edit_text(
-        "🔢 Bitta summaga nechtagacha \"band\" (masalan +1, +2, +3...) qo'yish mumkinligini kiriting "
-        "(tavsiya: 500-999):"
+        "🔢 Har bir summa uchun tasodifiy oxirgi 2 raqamni topishga nechta "
+        "urinish qilinsin (tavsiya: 90 — bu 10 dan 99 gacha bo'lgan barcha "
+        "variantlarni to'liq qamrab oladi):"
     )
     await state.set_state(AdminSettingsState.wait_autopay_offset)
     await call.answer()
@@ -2135,7 +2151,7 @@ async def set_autopay_offset_apply(msg: Message, state: FSMContext):
     if val is None or val < 1:
         return await msg.answer("❌ Faqat musbat butun son kiriting.")
     await db.set_setting("auto_pay_max_offset", str(val))
-    await msg.answer(f"{E('check')} Max band soni yangilandi: {val}")
+    await msg.answer(f"{E('check')} Urinishlar soni yangilandi: {val}")
     await state.clear()
     await show_admin_panel(msg)
 
