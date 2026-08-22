@@ -1,3 +1,6 @@
+from __future__ import annotations  # Python 3.9 va undan eskilarida ham
+                                     # "str | None" kabi zamonaviy type hint
+                                     # sintaksisi xato bermasligi uchun kerak.
 import asyncio
 import os
 import re
@@ -85,6 +88,9 @@ class AdminSettingsState(StatesGroup):
     wait_card2_owner             = State()
     wait_autopay_offset          = State()
     wait_autopay_expiry          = State()
+    wait_new_user_channel_id     = State()
+    wait_inactive_days           = State()
+    wait_incomplete_hours        = State()
 
 class EmojiState(StatesGroup):
     wait_forward = State()
@@ -135,6 +141,28 @@ async def is_maintenance_mode() -> bool:
     val = await db.get_setting("maintenance_mode")
     return val == "1"
 
+async def notify_new_member(user, referrer_id: int | None):
+    """Admin belgilagan kanalga yangi a'zo haqida to'liq ma'lumot yuboradi.
+    Kanal sozlanmagan bo'lsa, hech narsa qilmaydi (ixtiyoriy xususiyat)."""
+    channel_id = await get_setting("new_user_channel_id", "")
+    if not channel_id:
+        return
+    username_part = f"@{user.username}" if user.username else "— (username yo'q)"
+    ref_part = f"\n{E('referral')} Kim taklif qildi: <code>{referrer_id}</code>" if referrer_id else ""
+    text = (
+        f"{E('sparkle')} <b>Yangi foydalanuvchi botga qo'shildi!</b>\n\n"
+        f"{E('profile')} Ism: <b>{user.full_name}</b>\n"
+        f"{username_part}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n"
+        f"🌐 Til: {user.language_code or '—'}"
+        f"{ref_part}\n"
+        f"{E('clock')} Vaqt: {now_tashkent().strftime('%d.%m.%Y %H:%M')}"
+    )
+    try:
+        await bot.send_message(int(channel_id), text)
+    except Exception as e:
+        print(f"⚠️ Yangi a'zo xabarini kanalga yuborib bo'lmadi: {e}")
+
 # ─── NARX HISOBLASH ────────────────────────────────────────────
 # Ilgari kurs (12500) va margin (1.3) kodga qattiq yozilgan edi — shuning
 # uchun admin foizni o'zgartirganda ba'zi davlatlar bir xil, ba'zilari
@@ -159,6 +187,65 @@ async def calc_default_price(usd_price: float) -> int:
     margin = await get_default_margin()
     price  = int(float(usd_price) * rate * margin)
     return max(price, MIN_PRICE_SOM)
+
+# ─── FAOLLIK ESLATMALARI ────────────────────────────────────────
+INACTIVE_DAYS_DEFAULT    = 3   # shuncha kun kirmagan foydalanuvchiga eslatma
+INCOMPLETE_HOURS_DEFAULT = 6   # shuncha soat telefon tasdiqlamaganga eslatma
+REMINDER_CHECK_INTERVAL_SEC = 6 * 60 * 60  # har 6 soatda bir tekshiradi
+
+async def send_inactivity_reminders():
+    """Botga uzoq vaqt kirmagan foydalanuvchilarga eslatma yuboradi."""
+    days = int(await get_setting("inactive_reminder_days", INACTIVE_DAYS_DEFAULT))
+    users = await db.get_inactive_users(days=days)
+    sent = 0
+    for u in users:
+        try:
+            await bot.send_message(
+                u["user_id"],
+                f"{E('sparkle')} <b>Sizni sog'indik!</b>\n\n"
+                f"Bir necha kundan beri botimizga tashrif buyurmadingiz. "
+                f"Yangi davlatlar va arzon narxlar sizni kutmoqda {E('fire')}\n\n"
+                f"Qaytib kelib, bugungi bonusingizni ham unutmang {E('gift')}"
+            )
+            sent += 1
+        except Exception:
+            pass  # bloklagan yoki botni o'chirgan bo'lishi mumkin
+        await db.mark_inactive_reminder_sent(u["user_id"])
+    if sent:
+        print(f"🔔 {sent} ta faolsiz foydalanuvchiga eslatma yuborildi.")
+
+async def send_incomplete_reminders():
+    """Ro'yxatdan to'liq o'tmagan (telefon tasdiqlamagan) foydalanuvchilarga
+    eslatma yuboradi."""
+    hours = int(await get_setting("incomplete_reminder_hours", INCOMPLETE_HOURS_DEFAULT))
+    users = await db.get_incomplete_users(hours=hours)
+    sent = 0
+    for u in users:
+        try:
+            await bot.send_message(
+                u["user_id"],
+                f"{E('warn')} <b>Ro'yxatdan o'tishni yakunlamadingiz!</b>\n\n"
+                f"Botdan to'liq foydalanish uchun telefon raqamingizni tasdiqlashingiz kerak. "
+                f"Bu atigi bir necha soniya vaqt oladi {E('phone')}\n\n"
+                f"/start buyrug'ini bosib davom eting."
+            )
+            sent += 1
+        except Exception:
+            pass
+        await db.mark_incomplete_reminder_sent(u["user_id"])
+    if sent:
+        print(f"🔔 {sent} ta to'liq ro'yxatdan o'tmagan foydalanuvchiga eslatma yuborildi.")
+
+async def reminder_loop():
+    """Fonda doim ishlaydigan sikl — har REMINDER_CHECK_INTERVAL_SEC
+    soniyada faolsizlik va to'liqmaslik eslatmalarini tekshirib yuboradi."""
+    while True:
+        try:
+            await send_inactivity_reminders()
+            await send_incomplete_reminders()
+        except Exception as e:
+            print(f"⚠️ Eslatmalarni yuborishda xatolik: {e}")
+        await asyncio.sleep(REMINDER_CHECK_INTERVAL_SEC)
 
 # ─── AVTOMATIK TO'LOV (HUMOcard) ────────────────────────────────
 AUTO_PAY_MAX_OFFSET_DEFAULT   = 90    # tasodifiy oxirgi-2-raqam (10-99) uchun urinishlar soni
@@ -567,6 +654,26 @@ class MaintenanceMiddleware(BaseMiddleware):
 
 router.message.middleware(MaintenanceMiddleware())
 router.callback_query.middleware(MaintenanceMiddleware())
+
+class UserActivityMiddleware(BaseMiddleware):
+    """Har bir foydalanuvchi harakatida: (1) bloklangan bo'lsa — botga
+    umuman ruxsat bermaydi, (2) bloklanmagan bo'lsa — oxirgi faollik
+    vaqtini yangilaydi (faolsizlik eslatmalari shu asosida ishlaydi)."""
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = getattr(event, "from_user", None)
+        if user and user.id != ADMIN_ID:
+            try:
+                if await db.is_user_blocked(user.id):
+                    if isinstance(event, CallbackQuery):
+                        await event.answer("🚫 Siz bloklangansiz.", show_alert=True)
+                    return
+                await db.touch_last_active(user.id)
+            except Exception:
+                pass  # bazaga ulanishda vaqtinchalik uzilish botni to'xtatmasin
+        return await handler(event, data)
+
+router.message.middleware(UserActivityMiddleware())
+router.callback_query.middleware(UserActivityMiddleware())
 
 # ══════════════════════════════════════════════════════════════
 #  TO'LOVNI TASDIQLASH (admin qo'lda tasdiqlaydi)
@@ -1048,6 +1155,13 @@ async def start_handler(msg: Message, state: FSMContext):
         )
         return
 
+    # Foydalanuvchi qatorini DARHOL yaratamiz (telefon hali bo'lmasa ham) —
+    # shunda "ro'yxatdan to'liq o'tmaganlar" eslatmasi va yangi a'zo haqida
+    # kanalga xabar berish to'g'ri ishlaydi.
+    is_new = await db.add_user(msg.from_user.id, msg.from_user.full_name, str(msg.from_user.username or ""), referrer_id)
+    if is_new:
+        await notify_new_member(msg.from_user, referrer_id)
+
     user = await db.get_user(msg.from_user.id)
     if not user or not user.get("phone"):
         await msg.answer(
@@ -1059,7 +1173,6 @@ async def start_handler(msg: Message, state: FSMContext):
         await state.set_state(PhoneState.wait_phone)
         return
 
-    await db.add_user(msg.from_user.id, msg.from_user.full_name, str(msg.from_user.username or ""), referrer_id)
     await send_main(msg, msg.from_user.first_name)
 
 @router.callback_query(F.data == "check_sub")
@@ -1642,6 +1755,8 @@ async def admin_cmd(msg: Message):
         EmojiState.wait_forward, AutoPayStates.wait_amount,
         AdminSettingsState.wait_card2_number, AdminSettingsState.wait_card2_owner,
         AdminSettingsState.wait_autopay_offset, AdminSettingsState.wait_autopay_expiry,
+        AdminSettingsState.wait_new_user_channel_id, AdminSettingsState.wait_inactive_days,
+        AdminSettingsState.wait_incomplete_hours,
     )
 )
 async def admin_cancel_any(msg: Message, state: FSMContext):
@@ -1682,19 +1797,106 @@ async def adm_stats(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
-@admin_router.callback_query(F.data == "adm_users")
+@admin_router.callback_query(F.data.startswith("adm_users"))
 async def adm_users(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         return
-    users = await db.get_all_users()
-    text  = "👥 <b>Foydalanuvchilar balansi:</b>\n\n"
-    for i, u in enumerate(users[:30], 1):
-        text += f"{i}. {u['fullname']} (<code>{u['user_id']}</code>) — {u['balance']:,} so'm\n"
-    if len(users) > 30:
-        text += f"\n… va yana {len(users) - 30} ta foydalanuvchi.\nBirontasini batafsil ko'rish uchun «🔍 Foydalanuvchi profili» dan foydalaning."
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_refresh")]])
+    parts = call.data.split(":")
+    page = int(parts[1]) if len(parts) > 1 else 0
+    per_page = 8
+    users, total = await db.get_users_page(page=page, per_page=per_page)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    text = f"{E('referral')} <b>Foydalanuvchilar</b> ({total} ta)\n<i>{page+1}/{total_pages}-sahifa</i>\n\n"
+    buttons = []
+    for u in users:
+        status = "🚫" if u["is_blocked"] else "✅"
+        name = u["fullname"] or "Noma'lum"
+        buttons.append([ib_button(
+            f"{status} {name} — {u['balance']:,} so'm",
+            callback_data=f"adm_user_view:{u['user_id']}:{page}"
+        )])
+
+    nav = []
+    if page > 0:
+        nav.append(ib_button("", "arrow_l", style="primary", callback_data=f"adm_users:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+    if (page + 1) * per_page < total:
+        nav.append(ib_button("", "arrow_r", style="primary", callback_data=f"adm_users:{page+1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")])
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@admin_router.callback_query(F.data.startswith("adm_user_view:"))
+async def adm_user_view(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    _, uid_str, page = call.data.split(":")
+    uid = int(uid_str)
+    u = await db.get_user(uid)
+    if not u:
+        await call.answer("Foydalanuvchi topilmadi.", show_alert=True)
+        return
+    purchases = await db.get_purchases(uid)
+    status = "🚫 Bloklangan" if u["is_blocked"] else "✅ Faol"
+    last_active = u.get("last_active")
+    display_name = u['fullname'] or "Noma'lum"
+    text = (
+        f"{E('profile')} <b>{display_name}</b>\n\n"
+        f"🆔 Tartib: {u['tartib_id']} | Telegram ID: <code>{u['user_id']}</code>\n"
+        f"👤 Username: @{u['username'] or '—'}\n"
+        f"📱 Telefon: <code>{u['phone'] or 'Tasdiqlanmagan'}</code>\n"
+        f"{E('wallet')} Balans: <b>{u['balance']:,} so'm</b>\n"
+        f"{E('money')} Jami to'ldirgan: {u['total_deposited']:,} so'm\n"
+        f"{E('cart')} Xaridlar: {len(purchases)} ta\n"
+        f"📌 Holat: <b>{status}</b>\n"
+        f"⏰ Oxirgi faollik: {last_active.strftime('%d.%m.%Y %H:%M') if last_active else '—'}\n"
+        f"📅 Ro'yxatdan o'tgan: {u['created_at'].strftime('%d.%m.%Y') if u.get('created_at') else '—'}"
+    )
+    block_btn = (
+        ib_button("Blokdan chiqarish", "check", style="success", callback_data=f"adm_unblock:{uid}:{page}")
+        if u["is_blocked"] else
+        ib_button("Bloklash", "cross", style="danger", callback_data=f"adm_block:{uid}:{page}")
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [block_btn],
+        [ib_button("Orqaga", "arrow_l", callback_data=f"adm_users:{page}")],
+    ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data.startswith("adm_block:"))
+async def adm_block_user(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    _, uid_str, page = call.data.split(":")
+    uid = int(uid_str)
+    await db.set_user_blocked(uid, True)
+    try:
+        await bot.send_message(uid, f"{E('cross')} Siz botdan foydalanish huquqidan mahrum qilindingiz.")
+    except Exception:
+        pass
+    await call.answer(f"{E('check')} Bloklandi.", show_alert=True)
+    call.data = f"adm_user_view:{uid}:{page}"
+    await adm_user_view(call)
+
+@admin_router.callback_query(F.data.startswith("adm_unblock:"))
+async def adm_unblock_user(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    _, uid_str, page = call.data.split(":")
+    uid = int(uid_str)
+    await db.set_user_blocked(uid, False)
+    try:
+        await bot.send_message(uid, f"{E('check')} Blok bekor qilindi, botdan qaytadan foydalanishingiz mumkin.")
+    except Exception:
+        pass
+    await call.answer(f"{E('check')} Blokdan chiqarildi.", show_alert=True)
+    call.data = f"adm_user_view:{uid}:{page}"
+    await adm_user_view(call)
 
 # ─── KUNLIK HISOBOT (foyda / zarar) ─────────────────────────────
 @admin_router.callback_query(F.data == "adm_daily_report")
@@ -2068,10 +2270,105 @@ async def adm_settings(call: CallbackQuery):
         [InlineKeyboardButton(text="👤 Karta egasini o'zgartirish",    callback_data="set_card_owner")],
         [InlineKeyboardButton(text="✨ Premium emoji sozlash",         callback_data="adm_emojis")],
         [InlineKeyboardButton(text="⚡ Avtomatik to'lov sozlamalari",  callback_data="adm_autopay")],
+        [InlineKeyboardButton(text="🔔 Yangi a'zo va eslatmalar",      callback_data="adm_notify")],
         [InlineKeyboardButton(text="⬅️ Orqaga",                       callback_data="adm_refresh")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data == "adm_notify")
+async def adm_notify_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    channel_id     = await get_setting("new_user_channel_id", "")
+    inactive_days  = await get_setting("inactive_reminder_days", INACTIVE_DAYS_DEFAULT)
+    incomplete_hrs = await get_setting("incomplete_reminder_hours", INCOMPLETE_HOURS_DEFAULT)
+    text = (
+        f"🔔 <b>Yangi a'zo va eslatma sozlamalari</b>\n\n"
+        f"{E('sparkle')} Yangi a'zo kanali: <b>{channel_id or 'Sozlanmagan'}</b>\n"
+        f"<i>(har safar yangi odam /start bosganda, bu kanalga to'liq ma'lumot yuboriladi)</i>\n\n"
+        f"{E('clock')} Faolsiz foydalanuvchi eslatmasi: <b>{inactive_days} kundan keyin</b>\n"
+        f"<i>(botga shuncha kun kirmagan foydalanuvchilarga avtomatik eslatma yuboriladi)</i>\n\n"
+        f"{E('warn')} To'liq ro'yxatdan o'tmaganlarga eslatma: <b>{incomplete_hrs} soatdan keyin</b>\n"
+        f"<i>(telefon tasdiqlamagan foydalanuvchilarga avtomatik eslatma yuboriladi)</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [ib_button("Yangi a'zo kanalini sozlash", "bell", style="primary", callback_data="set_new_user_channel")],
+        [ib_button("Faolsizlik muddatini o'zgartirish", "clock", callback_data="set_inactive_days")],
+        [ib_button("To'liqmaslik muddatini o'zgartirish", "warn", callback_data="set_incomplete_hours")],
+        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer()
+
+@admin_router.callback_query(F.data == "set_new_user_channel")
+async def set_new_user_channel_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text(
+        f"{E('bell')} Yangi a'zo xabarlari yuboriladigan kanal ID sini kiriting.\n\n"
+        f"<i>Kanal ID sini olish uchun: botni o'sha kanalga admin qilib qo'shing, "
+        f"so'ng kanaldagi istalgan xabarni botga forward qiling — men ID sini aytib beraman "
+        f"(yoki oddiygina -100 bilan boshlanuvchi ID ni to'g'ridan-to'g'ri kiriting).</i>"
+    )
+    await state.set_state(AdminSettingsState.wait_new_user_channel_id)
+    await call.answer()
+
+@admin_router.message(AdminSettingsState.wait_new_user_channel_id)
+async def set_new_user_channel_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    channel_id = msg.text.strip()
+    if not (channel_id.lstrip("-").isdigit()):
+        return await msg.answer("❌ Faqat kanal ID sini kiriting (masalan: -1001234567890).")
+    try:
+        test_msg = await bot.send_message(int(channel_id), f"{E('check')} Bu kanal endi yangi a'zolar uchun sozlandi!")
+    except Exception as e:
+        return await msg.answer(f"❌ Bu kanalga xabar yuborib bo'lmadi: {e}\nBotni o'sha kanalga admin qilib qo'shganingizga ishonch hosil qiling.")
+    await db.set_setting("new_user_channel_id", channel_id)
+    await msg.answer(f"{E('check')} Yangi a'zo kanali sozlandi!")
+    await state.clear()
+    await show_admin_panel(msg)
+
+@admin_router.callback_query(F.data == "set_inactive_days")
+async def set_inactive_days_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text("⏰ Necha kun botga kirmagan foydalanuvchiga eslatma yuborilsin? (masalan: 3)")
+    await state.set_state(AdminSettingsState.wait_inactive_days)
+    await call.answer()
+
+@admin_router.message(AdminSettingsState.wait_inactive_days)
+async def set_inactive_days_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    val = parse_amount(msg.text)
+    if val is None or val < 1:
+        return await msg.answer("❌ Faqat musbat butun son kiriting.")
+    await db.set_setting("inactive_reminder_days", str(val))
+    await msg.answer(f"{E('check')} Faolsizlik muddati yangilandi: {val} kun")
+    await state.clear()
+    await show_admin_panel(msg)
+
+@admin_router.callback_query(F.data == "set_incomplete_hours")
+async def set_incomplete_hours_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text("⏰ Necha soat telefon tasdiqlamagan foydalanuvchiga eslatma yuborilsin? (masalan: 6)")
+    await state.set_state(AdminSettingsState.wait_incomplete_hours)
+    await call.answer()
+
+@admin_router.message(AdminSettingsState.wait_incomplete_hours)
+async def set_incomplete_hours_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    val = parse_amount(msg.text)
+    if val is None or val < 1:
+        return await msg.answer("❌ Faqat musbat butun son kiriting.")
+    await db.set_setting("incomplete_reminder_hours", str(val))
+    await msg.answer(f"{E('check')} To'liqmaslik muddati yangilandi: {val} soat")
+    await state.clear()
+    await show_admin_panel(msg)
 
 @admin_router.callback_query(F.data == "adm_autopay")
 async def adm_autopay_cb(call: CallbackQuery):
@@ -2410,6 +2707,11 @@ async def main():
             print("ℹ️ HUMOcard sozlanmagan — faqat qo'lda to'lov tizimi ishlaydi (.env да HUMO_* qo'shsangiz avtomatik yoqiladi)")
     except Exception as e:
         print(f"⚠️ HUMOcard tinglovchisini ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
+    try:
+        asyncio.create_task(reminder_loop())
+        print("✅ Faollik eslatmalari sikli ishga tushirildi ✅")
+    except Exception as e:
+        print(f"⚠️ Eslatmalar siklini ishga tushirishda xatolik: {e}")
     print("✅ Bot ishga tushdi! PostgreSQL ulandi ✅")
     await dp.start_polling(bot)
 
