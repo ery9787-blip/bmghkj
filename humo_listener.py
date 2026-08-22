@@ -25,6 +25,8 @@ Bir martalik sozlash — session string olish:
     HUMO_SESSION_STRING=1BVtsO...  (generate_session.py dan olingan)
     HUMO_BOT_USERNAME=HUMOcardbot
 """
+from __future__ import annotations  # Python 3.9 va undan eskilarida ham
+                                     # "dict | None" kabi sintaksis ishlashi uchun
 
 import os
 import re
@@ -106,7 +108,76 @@ def parse_humocard_message(text: str) -> dict | None:
     }
 
 
-async def start_humo_listener(db, bot, admin_id: int, E):
+async def process_deposit_amount(db, bot, admin_id: int, E, amount: int, card_last: str = "",
+                                  source: str = "unknown", log_event=None) -> bool:
+    """
+    Har qanday manbadan (Telethon tinglovchisi, webhook, yoki kelajakda
+    boshqa integratsiya) kelgan pul kirimini kutilayotgan avtomatik
+    to'lovlar bilan solishtiradi. Mos kelsa — balansni to'ldirib, ikkala
+    tomonga (foydalanuvchi + admin) xabar yuboradi.
+
+    log_event — ixtiyoriy async funksiya (bot.py dagi umumiy "hodisalar
+    kanali"ga yozib qo'yish uchun); berilmasa, shunchaki o'tkazib yuboriladi.
+
+    Ikki xil manba (masalan HUMOcard tinglovchisi VA tashqi webhook) bir
+    xil summani ikki marta yuborib yubormasligi uchun (masalan ikkalasi
+    ham ishlab tursa) — moslashtirish bazada FOR UPDATE SKIP LOCKED bilan
+    himoyalangan, shuning uchun bitta to'lov faqat BIR marta hisoblanadi.
+
+    Qaytaradi: True — agar mos to'lov topilib, hisoblansa; False — mos
+    kelmasa (masalan bu summani hech kim kutmayotgan bo'lsa).
+    """
+    payment = await db.find_matching_auto_payment(amount, card_last)
+    if not payment:
+        return False
+
+    await db.complete_auto_payment(payment["id"], card_used=card_last)
+    await db.update_balance(payment["user_id"], payment["final_amount"])
+    await db.log_transaction(
+        payment["user_id"], "topup", payment["final_amount"],
+        note=f"auto:{source}:{card_last}"
+    )
+    user = await db.get_user(payment["user_id"])
+    new_balance = user["balance"] if user else payment["final_amount"]
+
+    try:
+        await bot.send_message(
+            payment["user_id"],
+            f"{E('check')} <b>To'lovingiz avtomatik tasdiqlandi!</b>\n\n"
+            f"{E('money')} Hisobingizga <b>{payment['final_amount']:,} so'm</b> qo'shildi.\n"
+            f"{E('wallet')} Joriy balans: <b>{new_balance:,} so'm</b>\n\n"
+            f"Endi xohlagan xizmatdan foydalanishingiz mumkin {E('party')}"
+        )
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(
+            admin_id,
+            f"{E('check')} Avtomatik to'lov tasdiqlandi! ({source})\n\n"
+            f"{E('profile')} Foydalanuvchi: <code>{payment['user_id']}</code>\n"
+            f"{E('money')} Summa: {payment['final_amount']:,} so'm\n"
+            f"💳 Karta: *{card_last or '?'}"
+        )
+    except Exception:
+        pass
+
+    if log_event:
+        try:
+            await log_event(
+                f"{E('rocket')} <b>Avtomatik to'lov tasdiqlandi</b> ({source})\n\n"
+                f"{E('profile')} Foydalanuvchi: <code>{payment['user_id']}</code>\n"
+                f"{E('money')} +{payment['final_amount']:,} so'm\n"
+                f"{E('wallet')} Yangi balans: {new_balance:,} so'm\n"
+                f"💳 Karta: *{card_last or '?'}"
+            )
+        except Exception:
+            pass
+
+    return True
+
+
+async def start_humo_listener(db, bot, admin_id: int, E, log_event=None):
     """Botning main() ichidan asyncio.create_task() bilan chaqiriladi."""
     if not HUMO_ENABLED:
         logger.warning(
@@ -130,44 +201,11 @@ async def start_humo_listener(db, bot, admin_id: int, E):
             parsed = parse_humocard_message(event.raw_text)
             if not parsed or parsed["type"] != "deposit":
                 return
-
-            amount = parsed["amount"]
-            card_last = parsed.get("card_last", "")
-            payment = await db.find_matching_auto_payment(amount, card_last)
-            if not payment:
-                return  # bu summani (yoki shu kartada) kutayotgan hech kim yo'q
-
-            await db.complete_auto_payment(payment["id"], card_used=parsed.get("card_last", ""))
-            await db.update_balance(payment["user_id"], payment["final_amount"])
-            await db.log_transaction(
-                payment["user_id"], "topup", payment["final_amount"],
-                note=f"auto:humocard:{parsed.get('card_last','')}"
+            await process_deposit_amount(
+                db, bot, admin_id, E,
+                amount=parsed["amount"], card_last=parsed.get("card_last", ""),
+                source="telethon", log_event=log_event
             )
-            user = await db.get_user(payment["user_id"])
-            new_balance = user["balance"] if user else payment["final_amount"]
-
-            try:
-                await bot.send_message(
-                    payment["user_id"],
-                    f"{E('check')} <b>To'lovingiz avtomatik tasdiqlandi!</b>\n\n"
-                    f"{E('money')} Hisobingizga <b>{payment['final_amount']:,} so'm</b> qo'shildi.\n"
-                    f"{E('wallet')} Joriy balans: <b>{new_balance:,} so'm</b>\n\n"
-                    f"Endi xohlagan xizmatdan foydalanishingiz mumkin {E('party')}"
-                )
-            except Exception:
-                pass
-
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"{E('check')} Avtomatik to'lov (HUMOcard) tasdiqlandi!\n\n"
-                    f"{E('profile')} Foydalanuvchi: <code>{payment['user_id']}</code>\n"
-                    f"{E('money')} Summa: {payment['final_amount']:,} so'm\n"
-                    f"💳 Karta: *{parsed.get('card_last','?')}"
-                )
-            except Exception:
-                pass
-
         except Exception as e:
             logger.exception("HUMOcard xabarini qayta ishlashda xato: %s", e)
 
