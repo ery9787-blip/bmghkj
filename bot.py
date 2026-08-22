@@ -5,7 +5,9 @@ import asyncio
 import os
 import re
 import random
+import secrets
 import aiohttp
+from aiohttp import web
 from datetime import datetime, date, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types, F, Router, BaseMiddleware
@@ -91,6 +93,7 @@ class AdminSettingsState(StatesGroup):
     wait_new_user_channel_id     = State()
     wait_inactive_days           = State()
     wait_incomplete_hours        = State()
+    wait_low_balance             = State()
 
 class EmojiState(StatesGroup):
     wait_forward = State()
@@ -144,9 +147,6 @@ async def is_maintenance_mode() -> bool:
 async def notify_new_member(user, referrer_id: int | None):
     """Admin belgilagan kanalga yangi a'zo haqida to'liq ma'lumot yuboradi.
     Kanal sozlanmagan bo'lsa, hech narsa qilmaydi (ixtiyoriy xususiyat)."""
-    channel_id = await get_setting("new_user_channel_id", "")
-    if not channel_id:
-        return
     username_part = f"@{user.username}" if user.username else "— (username yo'q)"
     ref_part = f"\n{E('referral')} Kim taklif qildi: <code>{referrer_id}</code>" if referrer_id else ""
     text = (
@@ -155,13 +155,41 @@ async def notify_new_member(user, referrer_id: int | None):
         f"{username_part}\n"
         f"🆔 Telegram ID: <code>{user.id}</code>\n"
         f"🌐 Til: {user.language_code or '—'}"
-        f"{ref_part}\n"
-        f"{E('clock')} Vaqt: {now_tashkent().strftime('%d.%m.%Y %H:%M')}"
+        f"{ref_part}"
     )
+    await log_event(text)
+
+LOW_BALANCE_THRESHOLD_DEFAULT = 3000  # shundan kam qolsa, admin kanaliga ogohlantirish boradi
+
+async def log_event(text: str):
+    """Admin belgilagan "hodisalar" kanaliga xabar yuboradi (agar sozlangan
+    bo'lsa). Yangi a'zo, xarid, to'lov (qo'lda va avtomatik), kam balans
+    kabi HAMMA muhim hodisalar shu bitta funksiya orqali o'tadi — shuning
+    uchun kelajakda yangi hodisa turi qo'shish oson va izchil bo'ladi."""
+    channel_id = await get_setting("new_user_channel_id", "")
+    if not channel_id:
+        return
     try:
-        await bot.send_message(int(channel_id), text)
+        await bot.send_message(
+            int(channel_id),
+            f"{text}\n{E('clock')} {now_tashkent().strftime('%d.%m.%Y %H:%M')}"
+        )
     except Exception as e:
-        print(f"⚠️ Yangi a'zo xabarini kanalga yuborib bo'lmadi: {e}")
+        print(f"⚠️ Hodisa kanaliga xabar yuborib bo'lmadi: {e}")
+
+async def maybe_notify_low_balance(user_id: int, new_balance: int):
+    """Xariddan keyin foydalanuvchi balansi juda kamayib qolsa, admin
+    kanaliga bir marta (spam bo'lmasligi uchun pastki chegaradan o'tganda
+    faqat) ogohlantirish yuboradi."""
+    threshold = int(await get_setting("low_balance_threshold", LOW_BALANCE_THRESHOLD_DEFAULT))
+    if 0 <= new_balance < threshold:
+        user = await db.get_user(user_id)
+        name = user["fullname"] if user else str(user_id)
+        await log_event(
+            f"{E('warn')} <b>Foydalanuvchi balansi kamaydi</b>\n\n"
+            f"{E('profile')} {name} (<code>{user_id}</code>)\n"
+            f"{E('wallet')} Joriy balans: <b>{new_balance:,} so'm</b>"
+        )
 
 # ─── NARX HISOBLASH ────────────────────────────────────────────
 # Ilgari kurs (12500) va margin (1.3) kodga qattiq yozilgan edi — shuning
@@ -246,6 +274,67 @@ async def reminder_loop():
         except Exception as e:
             print(f"⚠️ Eslatmalarni yuborishda xatolik: {e}")
         await asyncio.sleep(REMINDER_CHECK_INTERVAL_SEC)
+
+# ─── WEBHOOK ORQALI AVTOMATIK TO'LOV (ixtiyoriy, qo'shimcha yo'l) ──
+# Ba'zan (masalan @LockAvtoPayBot kabi) tashqi xizmatlar karta SMS
+# xabarlarini o'zi kuzatib, aniqlangan to'lovni SIZNING serveringizga
+# HTTP so'rov (webhook) orqali yuboradi — sizga o'zingiz Telethon sessiya
+# ushlab turishning hojati qolmaydi. Bu yo'l ixtiyoriy va Telethon
+# tinglovchisi bilan PARALLEL ishlaydi — biri ishlamay qolsa, ikkinchisi
+# baribir ishlayveradi (bitta to'lov ikki marta hisoblanib ketmaydi,
+# chunki moslashtirish bazada FOR UPDATE SKIP LOCKED bilan himoyalangan).
+#
+# So'rov formati (GET yoki POST):
+#   https://SIZNING_DOMEN:PORT/webhook/payment?secret_key=...&amount=50000&card_last=2747
+#
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+
+async def get_webhook_secret() -> str:
+    """Webhook uchun maxfiy kalit — birinchi chaqirilganda avtomatik
+    tasodifiy generatsiya qilinadi va bazada saqlanadi."""
+    key = await db.get_setting("webhook_secret_key")
+    if not key:
+        key = secrets.token_urlsafe(24)
+        await db.set_setting("webhook_secret_key", key)
+    return key
+
+async def webhook_payment_handler(request: web.Request) -> web.Response:
+    params = request.query if request.method == "GET" else await request.post()
+    secret_key = str(params.get("secret_key", "")).strip()
+    amount_raw = str(params.get("amount", "")).strip()
+    card_last  = str(params.get("card_last", "")).strip()
+    method     = str(params.get("method", "webhook")).strip()
+
+    real_key = await get_webhook_secret()
+    if not secret_key or secret_key != real_key:
+        return web.json_response({"success": False, "error": "Noto'g'ri secret_key"}, status=403)
+
+    amount = parse_amount(amount_raw)
+    if not amount or amount <= 0:
+        return web.json_response({"success": False, "error": "Miqdor noto'g'ri"}, status=400)
+
+    try:
+        matched = await humo_listener.process_deposit_amount(
+            db, bot, ADMIN_ID, E, amount=amount, card_last=card_last,
+            source=f"webhook:{method}", log_event=log_event
+        )
+    except Exception as e:
+        print(f"⚠️ Webhook to'lovini qayta ishlashda xatolik: {e}")
+        return web.json_response({"success": False, "error": "Ichki xatolik"}, status=500)
+
+    if matched:
+        return web.json_response({"success": True, "message": "To'lov tasdiqlandi", "amount": amount})
+    return web.json_response({"success": False, "error": "Kutilayotgan to'lov topilmadi"})
+
+async def start_webhook_server():
+    app = web.Application()
+    app.router.add_route("GET", "/webhook/payment", webhook_payment_handler)
+    app.router.add_route("POST", "/webhook/payment", webhook_payment_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+    await site.start()
+    print(f"✅ Webhook server {WEBHOOK_PORT}-portda ishga tushdi (/webhook/payment)")
 
 # ─── AVTOMATIK TO'LOV (HUMOcard) ────────────────────────────────
 AUTO_PAY_MAX_OFFSET_DEFAULT   = 90    # tasodifiy oxirgi-2-raqam (10-99) uchun urinishlar soni
@@ -711,6 +800,13 @@ async def confirm_payment(pay_id: str, user_id: int, amount: int, fullname: str)
         )
     except Exception:
         pass
+
+    await log_event(
+        f"{E('card')} <b>Qo'lda to'lov tasdiqlandi</b>\n\n"
+        f"{E('profile')} {fullname} (<code>{user_id}</code>)\n"
+        f"{E('money')} +{amount:,} so'm\n"
+        f"{E('wallet')} Yangi balans: {user_balance:,} so'm"
+    )
 
 
 # ─── ADMIN BUYRUQ: QO'LDA BALANS QO'SHISH ─────────────────────
@@ -1220,9 +1316,11 @@ async def phone_received(msg: Message, state: FSMContext):
 
     already_had_phone = bool((await db.get_user(user_id) or {}).get("phone"))
 
-    await db.add_user(user_id, fullname, username, referrer_id)
+    is_new = await db.add_user(user_id, fullname, username, referrer_id)
     await db.update_phone(user_id, phone)
     await db.delete_pending_referrer(user_id)
+    if is_new:
+        await notify_new_member(msg.from_user, referrer_id)
 
     if referrer_id and referrer_id != user_id and not already_had_phone:
         if phone.startswith("+998"):
@@ -1253,7 +1351,9 @@ async def phone_wrong(msg: Message):
 async def show_balance(msg: Message):
     user = await db.get_user(msg.from_user.id)
     if not user:
-        await db.add_user(msg.from_user.id, msg.from_user.full_name, "")
+        is_new = await db.add_user(msg.from_user.id, msg.from_user.full_name, "")
+        if is_new:
+            await notify_new_member(msg.from_user, None)
         user = await db.get_user(msg.from_user.id)
     purchases = await db.get_purchases(msg.from_user.id)
     text = (
@@ -1517,6 +1617,9 @@ async def confirm_buy(call: CallbackQuery):
         await db.update_balance(user_id, -uzs_price)
         await db.log_transaction(user_id, "purchase", -uzs_price, note=f"{country_code}:{number}")
         order_id = await db.log_purchase(user_id, number, country_code, api_name, uzs_price)
+        updated_user = await db.get_user(user_id)
+        if updated_user:
+            await maybe_notify_low_balance(user_id, updated_user["balance"])
         try:
             orders_ch = await get_setting("orders_channel_id", ORDERS_CHANNEL)
             await bot.send_message(
@@ -1756,7 +1859,7 @@ async def admin_cmd(msg: Message):
         AdminSettingsState.wait_card2_number, AdminSettingsState.wait_card2_owner,
         AdminSettingsState.wait_autopay_offset, AdminSettingsState.wait_autopay_expiry,
         AdminSettingsState.wait_new_user_channel_id, AdminSettingsState.wait_inactive_days,
-        AdminSettingsState.wait_incomplete_hours,
+        AdminSettingsState.wait_incomplete_hours, AdminSettingsState.wait_low_balance,
     )
 )
 async def admin_cancel_any(msg: Message, state: FSMContext):
@@ -2283,23 +2386,48 @@ async def adm_notify_cb(call: CallbackQuery):
     channel_id     = await get_setting("new_user_channel_id", "")
     inactive_days  = await get_setting("inactive_reminder_days", INACTIVE_DAYS_DEFAULT)
     incomplete_hrs = await get_setting("incomplete_reminder_hours", INCOMPLETE_HOURS_DEFAULT)
+    low_bal        = await get_setting("low_balance_threshold", LOW_BALANCE_THRESHOLD_DEFAULT)
     text = (
-        f"🔔 <b>Yangi a'zo va eslatma sozlamalari</b>\n\n"
-        f"{E('sparkle')} Yangi a'zo kanali: <b>{channel_id or 'Sozlanmagan'}</b>\n"
-        f"<i>(har safar yangi odam /start bosganda, bu kanalga to'liq ma'lumot yuboriladi)</i>\n\n"
+        f"🔔 <b>Hodisalar kanali va eslatma sozlamalari</b>\n\n"
+        f"{E('sparkle')} Hodisalar kanali: <b>{channel_id or 'Sozlanmagan'}</b>\n"
+        f"<i>Shu kanalga quyidagilar avtomatik yuboriladi:</i>\n"
+        f"  • Yangi a'zo qo'shilganda\n"
+        f"  • Qo'lda to'lov tasdiqlanganda\n"
+        f"  • Avtomatik to'lov tasdiqlanganda\n"
+        f"  • Foydalanuvchi balansi kam qolganda\n\n"
         f"{E('clock')} Faolsiz foydalanuvchi eslatmasi: <b>{inactive_days} kundan keyin</b>\n"
-        f"<i>(botga shuncha kun kirmagan foydalanuvchilarga avtomatik eslatma yuboriladi)</i>\n\n"
         f"{E('warn')} To'liq ro'yxatdan o'tmaganlarga eslatma: <b>{incomplete_hrs} soatdan keyin</b>\n"
-        f"<i>(telefon tasdiqlamagan foydalanuvchilarga avtomatik eslatma yuboriladi)</i>"
+        f"{E('wallet')} Kam balans chegarasi: <b>{low_bal:,} so'm</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ib_button("Yangi a'zo kanalini sozlash", "bell", style="primary", callback_data="set_new_user_channel")],
+        [ib_button("Hodisalar kanalini sozlash", "bell", style="primary", callback_data="set_new_user_channel")],
         [ib_button("Faolsizlik muddatini o'zgartirish", "clock", callback_data="set_inactive_days")],
         [ib_button("To'liqmaslik muddatini o'zgartirish", "warn", callback_data="set_incomplete_hours")],
+        [ib_button("Kam balans chegarasini o'zgartirish", "wallet", callback_data="set_low_balance")],
         [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data == "set_low_balance")
+async def set_low_balance_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text("💼 Qaysi summadan kam qolsa, admin kanaliga xabar borsin? (masalan: 3000)")
+    await state.set_state(AdminSettingsState.wait_low_balance)
+    await call.answer()
+
+@admin_router.message(AdminSettingsState.wait_low_balance)
+async def set_low_balance_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    val = parse_amount(msg.text)
+    if val is None or val < 0:
+        return await msg.answer("❌ Faqat son kiriting.")
+    await db.set_setting("low_balance_threshold", str(val))
+    await msg.answer(f"{E('check')} Kam balans chegarasi yangilandi: {val:,} so'm")
+    await state.clear()
+    await show_admin_panel(msg)
 
 @admin_router.callback_query(F.data == "set_new_user_channel")
 async def set_new_user_channel_start(call: CallbackQuery, state: FSMContext):
@@ -2382,20 +2510,22 @@ async def adm_autopay_cb(call: CallbackQuery):
     listener_status = "✅ Ishga tushirilgan" if humo_listener.HUMO_ENABLED else "❌ Sozlanmagan (.env ni tekshiring)"
     auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
     text = (
-        f"⚡ <b>Avtomatik to'lov sozlamalari (HUMOcard)</b>\n\n"
-        f"🔌 Tinglovchi holati: <b>{listener_status}</b>\n"
+        f"⚡ <b>Avtomatik to'lov sozlamalari</b>\n\n"
         f"🔘 Avtomatik rejim: <b>{auto_status_text}</b>\n"
         f"💳 2-karta: <b>{card2_number or 'Sozlanmagan'}</b>"
         f"{f' ({card2_owner})' if card2_owner else ''}\n"
         f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
         f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
-        f"<i>Diqqat: HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING .env faylida "
-        f"sozlanmagan bo'lsa, avtomatik rejim yoqilgan bo'lsa ham ishlamaydi — "
-        f"foydalanuvchilarga faqat 'Qo'lda' usuli ko'rinadi.</i>"
+        f"<b>Ikkita mustaqil (parallel) usul mavjud — ikkalasini ham yoqishingiz mumkin:</b>\n"
+        f"1️⃣ Telethon tinglovchi: <b>{listener_status}</b>\n"
+        f"<i>(.env dagi HUMO_API_ID/HASH/SESSION orqali — o'zingiz session ulaysiz)</i>\n"
+        f"2️⃣ Webhook server: <b>✅ Har doim tayyor</b>\n"
+        f"<i>(tashqi xizmat — masalan karta SMS kuzatuvchi bot — sizga so'rov yuboradi)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button(("O'chirish" if auto_on else "Yoqish"), "rocket",
                     style=("danger" if auto_on else "success"), callback_data="toggle_autopay")],
+        [ib_button("Webhook manzilini ko'rish", "link", style="primary", callback_data="show_webhook_info")],
         [ib_button("2-karta raqamini sozlash", "card", callback_data="set_card2_number")],
         [ib_button("2-karta egasini sozlash", "profile", callback_data="set_card2_owner")],
         [ib_button("Urinishlar sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
@@ -2404,6 +2534,40 @@ async def adm_autopay_cb(call: CallbackQuery):
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data == "show_webhook_info")
+async def show_webhook_info_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    key = await get_webhook_secret()
+    text = (
+        f"{E('link')} <b>Webhook orqali avtomatik to'lov</b>\n\n"
+        f"Agar sizda karta SMS xabarlarini kuzatib, natijani HTTP so'rov "
+        f"orqali yuboradigan xizmat (masalan @LockAvtoPayBot kabi) bo'lsa, "
+        f"unga quyidagi manzilni bering:\n\n"
+        f"<code>http://SIZNING_SERVER_IP:{WEBHOOK_PORT}/webhook/payment</code>\n\n"
+        f"{E('key')} Maxfiy kalit (secret_key):\n<code>{key}</code>\n\n"
+        f"So'rov parametrlari: <code>secret_key</code>, <code>amount</code>, "
+        f"<code>card_last</code> (ixtiyoriy)\n\n"
+        f"<i>{E('warn')} Diqqat: agar serveringiz to'g'ridan-to'g'ri internetga "
+        f"ochiq bo'lmasa (masalan faqat nginx orqali 443-portda ishlasa), "
+        f"bu portni (yoki nginx orqali proksi yo'lini) ochish kerak bo'ladi.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [ib_button("Kalitni yangilash", "cross", style="danger", callback_data="regen_webhook_key")],
+        [ib_button("Orqaga", "arrow_l", callback_data="adm_autopay")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer()
+
+@admin_router.callback_query(F.data == "regen_webhook_key")
+async def regen_webhook_key_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    new_key = secrets.token_urlsafe(24)
+    await db.set_setting("webhook_secret_key", new_key)
+    await call.answer(f"{E('check')} Yangi kalit yaratildi!", show_alert=True)
+    await show_webhook_info_cb(call)
 
 @admin_router.callback_query(F.data == "toggle_autopay")
 async def toggle_autopay_cb(call: CallbackQuery):
@@ -2701,7 +2865,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     try:
         if humo_listener.HUMO_ENABLED:
-            asyncio.create_task(humo_listener.start_humo_listener(db, bot, ADMIN_ID, E))
+            asyncio.create_task(humo_listener.start_humo_listener(db, bot, ADMIN_ID, E, log_event=log_event))
             print("✅ HUMOcard avtomatik to'lov tinglovchisi ishga tushirildi ✅")
         else:
             print("ℹ️ HUMOcard sozlanmagan — faqat qo'lda to'lov tizimi ishlaydi (.env да HUMO_* qo'shsangiz avtomatik yoqiladi)")
@@ -2712,6 +2876,10 @@ async def main():
         print("✅ Faollik eslatmalari sikli ishga tushirildi ✅")
     except Exception as e:
         print(f"⚠️ Eslatmalar siklini ishga tushirishda xatolik: {e}")
+    try:
+        await start_webhook_server()
+    except Exception as e:
+        print(f"⚠️ Webhook serverni ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
     print("✅ Bot ishga tushdi! PostgreSQL ulandi ✅")
     await dp.start_polling(bot)
 
