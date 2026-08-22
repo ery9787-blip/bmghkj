@@ -40,6 +40,18 @@ class Database:
                     created_at    TIMESTAMP DEFAULT NOW()
                 )
             """)
+            # Foydalanuvchilarni boshqarish uchun qo'shimcha ustunlar — xavfsiz
+            # migratsiya (eski bazalarda ham, yangilarida ham ishlaydi).
+            for col_sql in [
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ DEFAULT NOW()",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS inactive_reminder_sent TIMESTAMPTZ",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS incomplete_reminder_sent TIMESTAMPTZ",
+            ]:
+                try:
+                    await conn.execute(col_sql)
+                except Exception as e:
+                    print(f"⚠️ users jadvalini yangilashda xatolik ({col_sql}): {e}")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS referrals (
                     id          SERIAL PRIMARY KEY,
@@ -160,15 +172,21 @@ class Database:
                       f"lekin asosiy bot ishlayveradi): {e}")
 
     # ─── USERS ─────────────────────────────────────────────────
-    async def add_user(self, user_id: int, fullname: str, username: str, referrer_id=None):
+    async def add_user(self, user_id: int, fullname: str, username: str, referrer_id=None) -> bool:
+        """Foydalanuvchini qo'shadi (yoki yangilaydi). Agar bu HAQIQIY YANGI
+        foydalanuvchi bo'lsa (birinchi marta /start bosgan) — True qaytaradi,
+        aks holda (allaqachon bor edi) — False. Bot shu orqali "yangi a'zo"
+        bildirishnomasini faqat chindan yangilarga yuboradi."""
         async with self.pool.acquire() as conn:
-            await conn.execute("""
+            row = await conn.fetchrow("""
                 INSERT INTO users (user_id, fullname, username, referrer_id)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (user_id) DO UPDATE
                 SET fullname = EXCLUDED.fullname,
                     username = EXCLUDED.username
+                RETURNING (xmax = 0) AS inserted
             """, user_id, fullname, username, referrer_id)
+            return bool(row["inserted"]) if row else False
 
     async def get_user(self, user_id: int):
         async with self.pool.acquire() as conn:
@@ -178,6 +196,68 @@ class Database:
     async def update_phone(self, user_id: int, phone: str):
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE users SET phone = $1 WHERE user_id = $2", phone, user_id)
+
+    async def touch_last_active(self, user_id: int):
+        """Foydalanuvchi botga har safar biror amal qilganda chaqiriladi —
+        "faol emaslar" eslatmasi kimga kerakligini aniqlash uchun."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET last_active = NOW() WHERE user_id = $1", user_id)
+
+    async def is_user_blocked(self, user_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            val = await conn.fetchval("SELECT is_blocked FROM users WHERE user_id = $1", user_id)
+            return bool(val)
+
+    async def set_user_blocked(self, user_id: int, blocked: bool):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET is_blocked = $1 WHERE user_id = $2", blocked, user_id)
+
+    async def get_users_page(self, page: int = 0, per_page: int = 10, only_blocked: bool = False):
+        """Foydalanuvchilar ro'yxatini sahifalab qaytaradi (admin panel uchun)."""
+        async with self.pool.acquire() as conn:
+            where = "WHERE is_blocked = TRUE" if only_blocked else ""
+            rows = await conn.fetch(
+                f"SELECT * FROM users {where} ORDER BY tartib_id DESC LIMIT $1 OFFSET $2",
+                per_page, page * per_page
+            )
+            total = await conn.fetchval(f"SELECT COUNT(*) FROM users {where}")
+            return [dict(r) for r in rows], total
+
+    async def get_inactive_users(self, days: int, remind_cooldown_days: int = 7):
+        """Necha kundan beri botga kirmagan (last_active dan), va oxirgi
+        eslatma yuborilganiga kamida remind_cooldown_days kun bo'lgan
+        (yoki hech qachon yuborilmagan) foydalanuvchilarni qaytaradi."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM users
+                WHERE is_blocked = FALSE
+                  AND last_active < NOW() - ($1 || ' days')::interval
+                  AND (inactive_reminder_sent IS NULL
+                       OR inactive_reminder_sent < NOW() - ($2 || ' days')::interval)
+            """, str(days), str(remind_cooldown_days))
+            return [dict(r) for r in rows]
+
+    async def mark_inactive_reminder_sent(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET inactive_reminder_sent = NOW() WHERE user_id = $1", user_id)
+
+    async def get_incomplete_users(self, hours: int, remind_cooldown_hours: int = 24):
+        """Ro'yxatdan to'liq o'tmagan (telefon tasdiqlamagan) va kamida
+        `hours` soatdan beri shunday turgan foydalanuvchilarni qaytaradi."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM users
+                WHERE is_blocked = FALSE
+                  AND (phone IS NULL OR phone = '')
+                  AND created_at < NOW() - ($1 || ' hours')::interval
+                  AND (incomplete_reminder_sent IS NULL
+                       OR incomplete_reminder_sent < NOW() - ($2 || ' hours')::interval)
+            """, str(hours), str(remind_cooldown_hours))
+            return [dict(r) for r in rows]
+
+    async def mark_incomplete_reminder_sent(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE users SET incomplete_reminder_sent = NOW() WHERE user_id = $1", user_id)
 
     async def update_balance(self, user_id: int, amount: int):
         async with self.pool.acquire() as conn:
