@@ -129,6 +129,23 @@ async def process_deposit_amount(db, bot, admin_id: int, E, amount: int, card_la
     """
     payment = await db.find_matching_auto_payment(amount, card_last)
     if not payment:
+        # Diqqat: bu shart emas — bu yerga tushish demak, "kirim aniqlandi,
+        # LEKIN shu summani kutayotgan hech kim yo'q" degani (masalan
+        # tasodifiy/eski to'lov, yoki band muddati allaqachon tugagan).
+        # Buni ham kanalga yozamiz — shunda admin tizim chindan ishlab
+        # turganini (shunchaki mos kelmayotganini) aniq ko'radi.
+        if log_event:
+            try:
+                await log_event(
+                    f"{E('search')} <b>Kirim aniqlandi, lekin mos to'lov topilmadi</b> ({source})\n\n"
+                    f"{E('money')} Summa: {amount:,} so'm\n"
+                    f"💳 Karta: *{card_last or '?'}\n\n"
+                    f"<i>Bu odatiy holat bo'lishi mumkin (masalan eski/tasodifiy pul o'tkazma, "
+                    f"yoki reservatsiya muddati tugagan). Agar foydalanuvchi shu summani "
+                    f"KUTAYOTGAN bo'lsa va bu xabar chiqsa — band muddati juda qisqa bo'lishi mumkin.</i>"
+                )
+            except Exception:
+                pass
         return False
 
     await db.complete_auto_payment(payment["id"], card_used=card_last)
