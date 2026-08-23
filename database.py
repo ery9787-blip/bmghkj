@@ -572,6 +572,17 @@ class Database:
             )
             return {int(r["final_amount"]) for r in rows}
 
+    async def get_pending_auto_payments(self):
+        """Hozir 'pending' va muddati o'tmagan BARCHA avtomatik to'lovlarni
+        qaytaradi — TolovAPI kabi tashqi tekshiruvchi (polling) manbalar
+        buni bittalab tashqi API orqali tekshirib chiqadi."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM auto_payments WHERE status = 'pending' AND expires_at > NOW() "
+                "ORDER BY created_at ASC"
+            )
+            return [dict(r) for r in rows]
+
     async def add_auto_payment(self, user_id: int, base_amount: int, final_amount: int,
                                 expires_at: datetime, target_card: str = "") -> int:
         async with self.pool.acquire() as conn:
