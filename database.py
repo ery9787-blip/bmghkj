@@ -599,16 +599,17 @@ class Database:
     async def find_matching_auto_payment(self, amount: int, card_last: str = ""):
         """HUMOcard'dan kelgan summa (va agar bilinsa karta oxiri) ga mos,
         hali 'pending' bo'lgan so'rovni topadi va band qilib qaytaradi.
-        Karta mos kelishi ixtiyoriy — agar so'rovda karta belgilanmagan
-        (target_card bo'sh) bo'lsa, istalgan kartadan tushgan pul mos deb
-        hisoblanadi (eski, karta ko'rsatilmagan yozuvlar bilan moslik uchun)."""
+        Karta mos kelishi ixtiyoriy: agar so'rovda karta belgilanmagan
+        (target_card bo'sh) BO'LSA, YOKI kiruvchi tomonda karta noma'lum
+        bo'lsa (masalan TolovAPI/webhook qaysi kartani bilmaydi, card_last
+        bo'sh keladi) — istalgan kartadan tushgan pul mos deb hisoblanadi."""
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 UPDATE auto_payments SET status = 'matching'
                 WHERE id = (
                     SELECT id FROM auto_payments
                     WHERE final_amount = $1 AND status = 'pending' AND expires_at > NOW()
-                      AND (target_card = '' OR target_card = $2)
+                      AND (target_card = '' OR $2 = '' OR target_card = $2)
                     ORDER BY created_at ASC LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
