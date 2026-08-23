@@ -488,7 +488,14 @@ async def reserve_auto_amount(user_id: int, base_amount: int):
     MIN_TAIL, MAX_TAIL = 1, 50  # qo'shiladigan tasodifiy summa oralig'i
 
     for card_number, card_owner in candidates:
-        reserved = await db.get_reserved_amounts(target_card=card_number)
+        # MUHIM: HUMOcard/banklar xabarida karta faqat OXIRGI 4 raqami
+        # bilan ko'rsatiladi (masalan "*2747"). Agar biz bu yerda to'liq
+        # karta raqamini (masalan "8600 6067 4557 2747") saqlasak,
+        # moslashtirishda hech qachon teng bo'lmaydi va to'lov HECH QACHON
+        # avtomatik tasdiqlanmaydi! Shuning uchun faqat oxirgi 4 ta
+        # raqamni ajratib olamiz.
+        card_last4 = "".join(ch for ch in card_number if ch.isdigit())[-4:]
+        reserved = await db.get_reserved_amounts(target_card=card_last4)
         final_amount = None
         for _ in range(max_attempts):
             tail = random.randint(MIN_TAIL, MAX_TAIL)
@@ -500,7 +507,7 @@ async def reserve_auto_amount(user_id: int, base_amount: int):
             continue  # bu kartada (juda kam ehtimol bilan) joy topilmadi, keyingisini sinaymiz
         offset = final_amount - base_amount
         expires_at = now_tashkent() + timedelta(minutes=expiry_min)
-        payment_id = await db.add_auto_payment(user_id, base_amount, final_amount, expires_at, target_card=card_number)
+        payment_id = await db.add_auto_payment(user_id, base_amount, final_amount, expires_at, target_card=card_last4)
         return {
             "payment_id": payment_id, "final_amount": final_amount, "offset": offset,
             "card_number": card_number, "card_owner": card_owner, "expires_at": expires_at,
