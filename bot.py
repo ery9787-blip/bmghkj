@@ -350,7 +350,7 @@ async def start_webhook_server():
     print(f"✅ Webhook server {WEBHOOK_PORT}-portda ishga tushdi (/webhook/payment)")
 
 # ─── AVTOMATIK TO'LOV (HUMOcard) ────────────────────────────────
-AUTO_PAY_MAX_OFFSET_DEFAULT   = 90    # tasodifiy oxirgi-2-raqam (10-99) uchun urinishlar soni
+AUTO_PAY_MAX_OFFSET_DEFAULT   = 50    # tasodifiy qo'shimcha (1-50 so'm) uchun urinishlar soni
 AUTO_PAY_EXPIRY_MIN_DEFAULT   = 20    # necha daqiqa kutiladi
 
 async def is_auto_pay_enabled() -> bool:
@@ -455,16 +455,18 @@ async def reserve_auto_amount(user_id: int, base_amount: int):
     """
     Berilgan summa uchun noyob "final_amount" band qiladi.
 
-    MUHIM: har doim (faqat to'qnashuvda emas) summaning oxirgi 2 raqamini
-    TASODIFIY qilib qo'yamiz (masalan 1000 -> 1000ga yaqin, lekin 1000
-    emas, masalan 1047). Bu ikki sabab uchun kerak:
+    MUHIM: har doim (faqat to'qnashuvda emas) summaga KICHIK tasodifiy son
+    (1 dan 50 so'mgacha) QO'SHIB qo'yamiz (masalan 1000 so'ralsa -> 1000
+    dan 50 so'm ko'p, ya'ni 1001-1050 oralig'ida). Bu ikki sabab uchun kerak:
       1) Aynan "dumaloq" summalar (1000, 5000, 50000) haqiqiy hayotda
          ENG KO'P uchraydigan summalar — agar band qilingan summa doim
          dumaloq bo'lsa, botga aloqasi yo'q, tasodifan kelgan boshqa bir
          pul o'tkazmasi ham xuddi shu summada bo'lib, noto'g'ri
          foydalanuvchiga hisoblanib ketish xavfi yuqori.
-      2) Tasodifiy oxirgi 2 raqam — bir nechta odam bir xil summani
-         xohlasa ham, to'qnashish ehtimoli juda past (100 xil variant).
+      2) Tasodifiy qo'shimcha — bir nechta odam bir xil summani xohlasa
+         ham, to'qnashish ehtimoli past (50 xil variant), va farq har
+         doim KICHIK (atigi 1-50 so'm) bo'lgani uchun foydalanuvchiga
+         noqulaylik keltirmaydi.
 
     Avval 1-karta fazosida joy qidiradi, u to'lib qolsa — 2-kartaga o'tadi.
     Qaytaradi: dict(payment_id, final_amount, offset, card_number,
@@ -483,14 +485,14 @@ async def reserve_auto_amount(user_id: int, base_amount: int):
     if card2_number:
         candidates.append((card2_number, card2_owner))
 
-    rounded_base = base_amount - (base_amount % 100)  # oxirgi 2 xonani olib tashlaymiz
+    MIN_TAIL, MAX_TAIL = 1, 50  # qo'shiladigan tasodifiy summa oralig'i
 
     for card_number, card_owner in candidates:
         reserved = await db.get_reserved_amounts(target_card=card_number)
         final_amount = None
         for _ in range(max_attempts):
-            tail = random.randint(10, 99)
-            cand = rounded_base + tail
+            tail = random.randint(MIN_TAIL, MAX_TAIL)
+            cand = base_amount + tail
             if cand not in reserved:
                 final_amount = cand
                 break
@@ -3151,9 +3153,9 @@ async def set_autopay_offset_start(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != ADMIN_ID:
         return
     await call.message.edit_text(
-        "🔢 Har bir summa uchun tasodifiy oxirgi 2 raqamni topishga nechta "
-        "urinish qilinsin (tavsiya: 90 — bu 10 dan 99 gacha bo'lgan barcha "
-        "variantlarni to'liq qamrab oladi):"
+        "🔢 Har bir summaga qo'shiladigan tasodifiy sonni (1-50 so'm oralig'ida) "
+        "topishga nechta urinish qilinsin (tavsiya: 50 — bu 1 dan 50 gacha bo'lgan "
+        "barcha variantlarni to'liq qamrab oladi):"
     )
     await state.set_state(AdminSettingsState.wait_autopay_offset)
     await call.answer()
