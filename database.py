@@ -340,6 +340,51 @@ class Database:
             )
             return int(val)
 
+    async def get_referral_leaderboard(self, period: str = "all", limit: int = 10):
+        """Kim eng ko'p odam taklif qilganini ko'rsatadigan reyting.
+        period: 'week' | 'month' | 'year' | 'all'."""
+        interval_map = {"week": "7 days", "month": "30 days", "year": "365 days"}
+        async with self.pool.acquire() as conn:
+            if period in interval_map:
+                rows = await conn.fetch(f"""
+                    SELECT r.referrer_id, COUNT(*) AS cnt, u.fullname, u.username
+                    FROM referrals r
+                    LEFT JOIN users u ON u.user_id = r.referrer_id
+                    WHERE r.created_at > NOW() - INTERVAL '{interval_map[period]}'
+                    GROUP BY r.referrer_id, u.fullname, u.username
+                    ORDER BY cnt DESC
+                    LIMIT $1
+                """, limit)
+            else:
+                rows = await conn.fetch("""
+                    SELECT r.referrer_id, COUNT(*) AS cnt, u.fullname, u.username
+                    FROM referrals r
+                    LEFT JOIN users u ON u.user_id = r.referrer_id
+                    GROUP BY r.referrer_id, u.fullname, u.username
+                    ORDER BY cnt DESC
+                    LIMIT $1
+                """, limit)
+            return [dict(r) for r in rows]
+
+    async def get_referral_rank(self, user_id: int, period: str = "all") -> tuple:
+        """Berilgan foydalanuvchining reytingdagi o'rnini va shu davrdagi
+        taklif sonini qaytaradi: (o'rin, soni). Agar hech kimni taklif
+        qilmagan bo'lsa (0, 0) qaytaradi."""
+        interval_map = {"week": "7 days", "month": "30 days", "year": "365 days"}
+        where_clause = f"WHERE created_at > NOW() - INTERVAL '{interval_map[period]}'" if period in interval_map else ""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(f"""
+                SELECT referrer_id, COUNT(*) AS cnt
+                FROM referrals
+                {where_clause}
+                GROUP BY referrer_id
+                ORDER BY cnt DESC
+            """)
+            for idx, row in enumerate(rows, start=1):
+                if row["referrer_id"] == user_id:
+                    return idx, row["cnt"]
+            return 0, 0
+
     async def get_referrer_info(self, user_id: int):
         """Foydalanuvchini kim taklif qilganini (referrer) topib beradi."""
         async with self.pool.acquire() as conn:
