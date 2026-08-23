@@ -59,6 +59,13 @@ class PayStates(StatesGroup):
 class AutoPayStates(StatesGroup):
     wait_amount = State()
 
+class HumoSetupStates(StatesGroup):
+    wait_api_id  = State()
+    wait_api_hash = State()
+    wait_phone   = State()
+    wait_code    = State()
+    wait_password = State()
+
 class BalanceChangeState(StatesGroup):
     wait_user_id = State()
     wait_amount  = State()
@@ -347,7 +354,53 @@ async def get_auto_pay_max_offset() -> int:
     return int(await get_setting("auto_pay_max_offset", AUTO_PAY_MAX_OFFSET_DEFAULT))
 
 async def get_auto_pay_expiry_min() -> int:
-    return int(await get_setting("auto_pay_expiry_min", AUTO_PAY_EXPIRY_MIN_DEFAULT))
+    val = int(await get_setting("auto_pay_expiry_min", AUTO_PAY_EXPIRY_MIN_DEFAULT))
+    # Bank/karta bildirishnomalari kechikishi mumkinligi uchun 5 daqiqadan
+    # kam bo'lishiga umuman yo'l qo'ymaymiz — hatto bazada eski (xato)
+    # qiymat saqlangan bo'lsa ham.
+    return max(val, 5)
+
+# ─── HUMOcard SESSIYASINI BOT ICHIDAN ULASH ─────────────────────
+# Session generate_session.py orqali qo'lda yaratish o'rniga, endi
+# to'g'ridan-to'g'ri botning o'zi orqali (telefon -> kod -> parol)
+# ulash mumkin. Bu orqali ulanish HAQIQATDA muvaffaqiyatli bo'lganini
+# (qaysi akkaunt ulanganini) aniq ko'rish mumkin.
+_humo_setup_ctx: dict = {}       # admin_id -> {"client", "phone", "phone_code_hash", "api_id", "api_hash"}
+_humo_listener_task = None       # joriy ishlab turgan tinglovchi vazifasi (qayta ishga tushirish uchun)
+
+async def get_humo_credentials():
+    """Bazada (admin panel orqali) yoki .env da sozlangan HUMOcard login
+    ma'lumotlarini qaytaradi — baza ustunlik qiladi."""
+    api_id  = await get_setting("humo_api_id", os.getenv("HUMO_API_ID", ""))
+    api_hash = await get_setting("humo_api_hash", os.getenv("HUMO_API_HASH", ""))
+    session  = await get_setting("humo_session_string", os.getenv("HUMO_SESSION_STRING", ""))
+    return str(api_id or ""), str(api_hash or ""), str(session or "")
+
+async def is_humo_configured() -> bool:
+    api_id, api_hash, session = await get_humo_credentials()
+    return bool(api_id and api_hash and session)
+
+async def start_or_restart_humo_listener():
+    """Joriy sozlamalar (baza yoki .env) bilan HUMOcard tinglovchisini
+    (qayta) ishga tushiradi. Avval eski vazifa bo'lsa, to'xtatadi —
+    shu bilan bitta sessiyaga ikkita parallel ulanish bo'lib qolmaydi."""
+    global _humo_listener_task
+    if _humo_listener_task and not _humo_listener_task.done():
+        _humo_listener_task.cancel()
+        try:
+            await _humo_listener_task
+        except Exception:
+            pass
+    api_id, api_hash, session = await get_humo_credentials()
+    if not (api_id and api_hash and session):
+        return False
+    _humo_listener_task = asyncio.create_task(
+        humo_listener.start_humo_listener_with_creds(
+            db, bot, ADMIN_ID, E, api_id=int(api_id), api_hash=api_hash,
+            session_string=session, log_event=log_event
+        )
+    )
+    return True
 
 async def reserve_auto_amount(user_id: int, base_amount: int):
     """
@@ -1737,9 +1790,43 @@ async def show_referral(call: CallbackQuery):
         f"{E('sparkle')} Har bir taklif qilgan do'stingiz uchun <b>{ref_bonus:,} so'm</b> bonus olasiz!\n"
         f"{E('warn')} Bonus faqat <b>+998</b> (O'zbekiston) raqamli foydalanuvchilar uchun beriladi."
     )
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_earn")]
-    ]))
+    buttons = []
+    if (await get_setting("leaderboard_public", "0")) == "1":
+        buttons.append([ib_button("Reytingni ko'rish", "star", style="primary", callback_data="user_leaderboard:all")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_earn")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("user_leaderboard:"))
+async def show_user_leaderboard(call: CallbackQuery):
+    if (await get_setting("leaderboard_public", "0")) != "1":
+        await call.answer("Bu bo'lim hozircha yopiq.", show_alert=True)
+        return
+    period = call.data.split(":")[1]
+    period_labels = {"week": "Haftalik", "month": "Oylik", "year": "Yillik", "all": "Umumiy"}
+    rows = await db.get_referral_leaderboard(period=period, limit=10)
+    my_rank, my_count = await db.get_referral_rank(call.from_user.id, period=period)
+
+    text = f"{E('star')} <b>Eng faol takliflar — {period_labels.get(period, 'Umumiy')}</b>\n\n"
+    if not rows:
+        text += "<i>Hozircha hech kim odam taklif qilmagan. Birinchi bo'ling!</i>"
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        for i, r in enumerate(rows):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            name = r["fullname"] or "Foydalanuvchi"
+            text += f"{medal} <b>{name}</b> — <b>{r['cnt']}</b> ta\n"
+        if my_rank:
+            text += f"\n{E('sparkle')} Sizning o'rningiz: <b>{my_rank}-o'rin</b> ({my_count} ta)"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [ib_button("Haftalik", callback_data="user_leaderboard:week", style=("primary" if period == "week" else None)),
+         ib_button("Oylik", callback_data="user_leaderboard:month", style=("primary" if period == "month" else None))],
+        [ib_button("Yillik", callback_data="user_leaderboard:year", style=("primary" if period == "year" else None)),
+         ib_button("Umumiy", callback_data="user_leaderboard:all", style=("primary" if period == "all" else None))],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"referral:{call.from_user.id}")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
 @router.callback_query(F.data == "daily_bonus")
@@ -1821,8 +1908,9 @@ async def show_admin_panel(target):
          ib_button("Narx sozlash", "card", style="primary", callback_data="adm_prices")],
         [ib_button("Raqam qidirish", "search", callback_data="adm_search"),
          ib_button("Xabar yuborish", "bell", style="primary", callback_data="adm_broadcast")],
-        [ib_button("Bot sozlamalari", "gear", callback_data="adm_settings"),
-         ib_button("Yangilash", "sparkle", callback_data="adm_refresh")],
+        [ib_button("Referal reytingi", "star", style="primary", callback_data="adm_leaderboard:all"),
+         ib_button("Bot sozlamalari", "gear", callback_data="adm_settings")],
+        [ib_button("Yangilash", "sparkle", callback_data="adm_refresh")],
         [ib_button(
             ("Ta'mirlashni o'chirish" if maintenance else "Ta'mirlash rejimini yoqish"), "warn",
             style=("success" if maintenance else "danger"),
@@ -1860,11 +1948,19 @@ async def admin_cmd(msg: Message):
         AdminSettingsState.wait_autopay_offset, AdminSettingsState.wait_autopay_expiry,
         AdminSettingsState.wait_new_user_channel_id, AdminSettingsState.wait_inactive_days,
         AdminSettingsState.wait_incomplete_hours, AdminSettingsState.wait_low_balance,
+        HumoSetupStates.wait_api_id, HumoSetupStates.wait_api_hash, HumoSetupStates.wait_phone,
+        HumoSetupStates.wait_code, HumoSetupStates.wait_password,
     )
 )
 async def admin_cancel_any(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
+    ctx = _humo_setup_ctx.pop(msg.from_user.id, None)
+    if ctx and ctx.get("client"):
+        try:
+            await ctx["client"].disconnect()
+        except Exception:
+            pass
     await state.clear()
     await msg.answer("❌ Amal bekor qilindi.")
     await show_admin_panel(msg)
@@ -1899,6 +1995,53 @@ async def adm_stats(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_refresh")]])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data.startswith("adm_leaderboard:"))
+async def adm_leaderboard_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    period = call.data.split(":")[1]
+    period_labels = {"week": "Haftalik", "month": "Oylik", "year": "Yillik", "all": "Umumiy"}
+    rows = await db.get_referral_leaderboard(period=period, limit=15)
+
+    text = f"{E('star')} <b>Referal reytingi — {period_labels.get(period, 'Umumiy')}</b>\n\n"
+    if not rows:
+        text += "<i>Hozircha hech kim odam taklif qilmagan.</i>"
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        for i, r in enumerate(rows):
+            medal = medals[i] if i < 3 else f"{i+1}."
+            name = r["fullname"] or f"ID {r['referrer_id']}"
+            uname = f" (@{r['username']})" if r.get("username") else ""
+            text += f"{medal} <b>{name}</b>{uname} — <b>{r['cnt']}</b> ta\n"
+
+    public_on = (await get_setting("leaderboard_public", "0")) == "1"
+    kb_rows = [[
+        ib_button("Haftalik", callback_data="adm_leaderboard:week", style=("primary" if period == "week" else None)),
+        ib_button("Oylik", callback_data="adm_leaderboard:month", style=("primary" if period == "month" else None)),
+    ], [
+        ib_button("Yillik", callback_data="adm_leaderboard:year", style=("primary" if period == "year" else None)),
+        ib_button("Umumiy", callback_data="adm_leaderboard:all", style=("primary" if period == "all" else None)),
+    ], [
+        ib_button(
+            ("Foydalanuvchilarga yopish" if public_on else "Foydalanuvchilarga ochish"),
+            style=("danger" if public_on else "success"),
+            callback_data="toggle_leaderboard_public"
+        )
+    ], [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")]]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await call.answer()
+
+@admin_router.callback_query(F.data == "toggle_leaderboard_public")
+async def toggle_leaderboard_public_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    new_val = "0" if (await get_setting("leaderboard_public", "0")) == "1" else "1"
+    await db.set_setting("leaderboard_public", new_val)
+    msg = "✅ Endi barcha foydalanuvchilar reytingni ko'ra oladi!" if new_val == "1" else "🚫 Reyting endi faqat admin uchun."
+    await call.answer(msg, show_alert=True)
+    call.data = "adm_leaderboard:all"
+    await adm_leaderboard_cb(call)
 
 @admin_router.callback_query(F.data.startswith("adm_users"))
 async def adm_users(call: CallbackQuery):
@@ -2507,7 +2650,14 @@ async def adm_autopay_cb(call: CallbackQuery):
     card2_owner  = await get_setting("card2_owner", "")
     max_offset   = await get_auto_pay_max_offset()
     expiry_min   = await get_auto_pay_expiry_min()
-    listener_status = "✅ Ishga tushirilgan" if humo_listener.HUMO_ENABLED else "❌ Sozlanmagan (.env ni tekshiring)"
+    configured   = await is_humo_configured()
+    live_status  = humo_listener.get_status()
+    if live_status["connected"]:
+        listener_status = f"✅ Ulangan: {live_status['account']}"
+    elif configured:
+        listener_status = "🟡 Sozlangan, lekin hozir ulanmagan (botni qayta ishga tushiring)"
+    else:
+        listener_status = "❌ Sozlanmagan"
     auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
     text = (
         f"⚡ <b>Avtomatik to'lov sozlamalari</b>\n\n"
@@ -2516,16 +2666,17 @@ async def adm_autopay_cb(call: CallbackQuery):
         f"{f' ({card2_owner})' if card2_owner else ''}\n"
         f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
         f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
-        f"<b>Ikkita mustaqil (parallel) usul mavjud — ikkalasini ham yoqishingiz mumkin:</b>\n"
+        f"<b>Ikkita mustaqil (parallel) usul mavjud:</b>\n"
         f"1️⃣ Telethon tinglovchi: <b>{listener_status}</b>\n"
-        f"<i>(.env dagi HUMO_API_ID/HASH/SESSION orqali — o'zingiz session ulaysiz)</i>\n"
         f"2️⃣ Webhook server: <b>✅ Har doim tayyor</b>\n"
         f"<i>(tashqi xizmat — masalan karta SMS kuzatuvchi bot — sizga so'rov yuboradi)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button(("O'chirish" if auto_on else "Yoqish"), "rocket",
                     style=("danger" if auto_on else "success"), callback_data="toggle_autopay")],
-        [ib_button("Webhook manzilini ko'rish", "link", style="primary", callback_data="show_webhook_info")],
+        [ib_button("Sessiyani bot orqali ulash", "phone", style="primary", callback_data="setup_humo_session")],
+        [ib_button("Holatni tekshirish", "search", callback_data="check_humo_status")],
+        [ib_button("Webhook manzilini ko'rish", "link", callback_data="show_webhook_info")],
         [ib_button("2-karta raqamini sozlash", "card", callback_data="set_card2_number")],
         [ib_button("2-karta egasini sozlash", "profile", callback_data="set_card2_owner")],
         [ib_button("Urinishlar sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
@@ -2534,6 +2685,198 @@ async def adm_autopay_cb(call: CallbackQuery):
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data == "check_humo_status")
+async def check_humo_status_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    status = humo_listener.get_status()
+    if status["connected"]:
+        text = (
+            f"{E('check')} <b>Ulangan va ishlayapti!</b>\n\n"
+            f"{E('profile')} Akkaunt: <b>{status['account']}</b>\n"
+            f"📞 Telefon: <code>{status.get('phone') or '—'}</code>\n\n"
+            f"<i>Demak HUMOcard botidan kelayotgan xabarlar shu akkaunt orqali "
+            f"real vaqtda kuzatilmoqda.</i>"
+        )
+    else:
+        err = status.get("error")
+        configured = await is_humo_configured()
+        if err:
+            text = f"{E('cross')} <b>Ulanmagan.</b>\n\nXato: <code>{err}</code>"
+        elif configured:
+            text = (
+                f"{E('warn')} <b>Sozlangan, lekin hozir ishlamayapti.</b>\n\n"
+                f"Ehtimol bot hali qayta ishga tushirilmagan, yoki tinglovchi "
+                f"boshqa sababdan to'xtagan. Botni qayta ishga tushirib ko'ring."
+            )
+        else:
+            text = (
+                f"{E('cross')} <b>Sessiya hali sozlanmagan.</b>\n\n"
+                f"«📱 Sessiyani bot orqali ulash» tugmasi orqali ulang."
+            )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", callback_data="adm_autopay")]])
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer()
+
+@admin_router.callback_query(F.data == "setup_humo_session")
+async def setup_humo_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    api_id, api_hash, _ = await get_humo_credentials()
+    if api_id and api_hash:
+        await call.message.edit_text(
+            f"{E('phone')} Telefon raqamingizni xalqaro formatda kiriting "
+            f"(masalan: <code>+998901234567</code>):\n\n"
+            f"<i>Bu — HUMOcard bot xabarlari keladigan akkauntning raqami bo'lishi kerak.</i>"
+        )
+        await state.set_state(HumoSetupStates.wait_phone)
+    else:
+        await call.message.edit_text(
+            f"{E('key')} my.telegram.org saytidan olingan <b>API_ID</b> ni kiriting:"
+        )
+        await state.set_state(HumoSetupStates.wait_api_id)
+    await call.answer()
+
+@admin_router.message(HumoSetupStates.wait_api_id)
+async def setup_humo_api_id(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    if not msg.text.strip().isdigit():
+        return await msg.answer("❌ API_ID faqat raqamlardan iborat bo'lishi kerak.")
+    await state.update_data(humo_api_id=msg.text.strip())
+    await msg.answer(f"{E('key')} Endi <b>API_HASH</b> ni kiriting:")
+    await state.set_state(HumoSetupStates.wait_api_hash)
+
+@admin_router.message(HumoSetupStates.wait_api_hash)
+async def setup_humo_api_hash(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(humo_api_hash=msg.text.strip())
+    await msg.answer(
+        f"{E('phone')} Telefon raqamingizni xalqaro formatda kiriting "
+        f"(masalan: <code>+998901234567</code>):"
+    )
+    await state.set_state(HumoSetupStates.wait_phone)
+
+@admin_router.message(HumoSetupStates.wait_phone)
+async def setup_humo_phone(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    saved_id, saved_hash, _ = await get_humo_credentials()
+    api_id_raw = data.get("humo_api_id") or saved_id
+    api_hash   = data.get("humo_api_hash") or saved_hash
+    if not (api_id_raw and api_hash):
+        await msg.answer("❌ API_ID/API_HASH topilmadi. Qaytadan boshlang.")
+        await state.clear()
+        return
+    phone = msg.text.strip()
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+    except ImportError:
+        await msg.answer("❌ Serverda telethon o'rnatilmagan. Terminalda: <code>pip install telethon</code>")
+        await state.clear()
+        return
+
+    client = TelegramClient(StringSession(), int(api_id_raw), api_hash)
+    await client.connect()
+    try:
+        sent = await client.send_code_request(phone)
+    except Exception as e:
+        await client.disconnect()
+        await msg.answer(f"❌ Kod yuborishda xatolik: {e}")
+        return
+
+    _humo_setup_ctx[msg.from_user.id] = {
+        "client": client, "phone": phone, "phone_code_hash": sent.phone_code_hash,
+        "api_id": api_id_raw, "api_hash": api_hash,
+    }
+    await msg.answer(
+        f"{E('check')} Kod <b>{phone}</b> raqamiga (Telegram orqali) yuborildi!\n"
+        f"Kelgan kodni kiriting:"
+    )
+    await state.set_state(HumoSetupStates.wait_code)
+
+@admin_router.message(HumoSetupStates.wait_code)
+async def setup_humo_code(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    ctx = _humo_setup_ctx.get(msg.from_user.id)
+    if not ctx:
+        await msg.answer("❌ Sessiya topilmadi, qaytadan boshlang.")
+        await state.clear()
+        return
+    client = ctx["client"]
+    try:
+        from telethon.errors import SessionPasswordNeededError
+        await client.sign_in(phone=ctx["phone"], code=msg.text.strip(), phone_code_hash=ctx["phone_code_hash"])
+    except SessionPasswordNeededError:
+        await msg.answer(f"{E('key')} Ikki bosqichli (2FA) parolingizni kiriting:")
+        await state.set_state(HumoSetupStates.wait_password)
+        return
+    except Exception as e:
+        await msg.answer(f"❌ Kod xato yoki muddati o'tgan: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
+        return
+    await _finish_humo_setup(msg, state)
+
+@admin_router.message(HumoSetupStates.wait_password)
+async def setup_humo_password(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    ctx = _humo_setup_ctx.get(msg.from_user.id)
+    if not ctx:
+        await msg.answer("❌ Sessiya topilmadi, qaytadan boshlang.")
+        await state.clear()
+        return
+    try:
+        await ctx["client"].sign_in(password=msg.text.strip())
+    except Exception as e:
+        await msg.answer(f"❌ Parol xato: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
+        return
+    await _finish_humo_setup(msg, state)
+
+async def _finish_humo_setup(msg: Message, state: FSMContext):
+    ctx = _humo_setup_ctx.pop(msg.from_user.id, None)
+    if not ctx:
+        await state.clear()
+        return
+    client = ctx["client"]
+    session_string = client.session.save()
+    try:
+        me = await client.get_me()
+        account_name = f"{me.first_name} (@{me.username})" if me.username else (me.first_name or "Noma'lum")
+    except Exception:
+        account_name = "Noma'lum"
+    await client.disconnect()
+
+    await db.set_setting("humo_api_id", str(ctx["api_id"]))
+    await db.set_setting("humo_api_hash", ctx["api_hash"])
+    await db.set_setting("humo_session_string", session_string)
+    await state.clear()
+
+    await msg.answer(
+        f"{E('check')} <b>Sessiya muvaffaqiyatli ulandi!</b>\n\n"
+        f"{E('profile')} Akkaunt: <b>{account_name}</b>\n\n"
+        f"{E('rocket')} Endi tinglovchini ishga tushiryapman..."
+    )
+
+    started = await start_or_restart_humo_listener()
+    await asyncio.sleep(2)  # ulanish tugashi uchun ozgina kutamiz
+    live_status = humo_listener.get_status()
+    if live_status["connected"]:
+        await msg.answer(
+            f"{E('check')} <b>Tasdiqlandi — tinglovchi ishlayapti!</b>\n"
+            f"{E('profile')} {live_status['account']}"
+        )
+    elif started:
+        await msg.answer(f"{E('warn')} Ishga tushirildi, lekin holatini hali tasdiqlab bo'lmadi. "
+                          f"Bir necha soniyadan so'ng «Holatni tekshirish» tugmasini bosing.")
+    else:
+        await msg.answer(f"{E('cross')} Ishga tushirishda muammo bo'ldi.")
+    await show_admin_panel(msg)
 
 @admin_router.callback_query(F.data == "show_webhook_info")
 async def show_webhook_info_cb(call: CallbackQuery):
@@ -2574,9 +2917,9 @@ async def toggle_autopay_cb(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         return
     new_val = "0" if await is_auto_pay_enabled() else "1"
-    if new_val == "1" and not humo_listener.HUMO_ENABLED:
+    if new_val == "1" and not await is_humo_configured():
         await call.answer(
-            "❌ Avval .env faylida HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING sozlang!",
+            "❌ Avval sessiyani ulang: «📱 Sessiyani bot orqali ulash» yoki .env orqali sozlang!",
             show_alert=True
         )
         return
@@ -2654,8 +2997,15 @@ async def set_autopay_expiry_apply(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID:
         return
     val = parse_amount(msg.text)
-    if val is None or val < 1:
-        return await msg.answer("❌ Faqat musbat butun son kiriting.")
+    MIN_EXPIRY_MIN = 5
+    if val is None or val < MIN_EXPIRY_MIN:
+        return await msg.answer(
+            f"❌ Kamida {MIN_EXPIRY_MIN} daqiqa bo'lishi kerak.\n\n"
+            f"{E('warn')} Diqqat: bank/karta tizimlari real to'lovni aniqlashda "
+            f"ba'zan bir necha o'n soniyadan bir necha daqiqagacha kechikishi mumkin. "
+            f"Juda qisqa muddat qo'ysangiz, foydalanuvchi TO'G'RI to'lov qilsa ham, "
+            f"bildirishnoma kech kelib, band bekor bo'lib qolishi mumkin!"
+        )
     await db.set_setting("auto_pay_expiry_min", str(val))
     await msg.answer(f"{E('check')} Kutish muddati yangilandi: {val} daqiqa")
     await state.clear()
@@ -2864,11 +3214,13 @@ async def main():
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
     try:
-        if humo_listener.HUMO_ENABLED:
-            asyncio.create_task(humo_listener.start_humo_listener(db, bot, ADMIN_ID, E, log_event=log_event))
-            print("✅ HUMOcard avtomatik to'lov tinglovchisi ishga tushirildi ✅")
+        if await is_humo_configured():
+            started = await start_or_restart_humo_listener()
+            if started:
+                print("✅ HUMOcard avtomatik to'lov tinglovchisi ishga tushirildi ✅")
         else:
-            print("ℹ️ HUMOcard sozlanmagan — faqat qo'lda to'lov tizimi ishlaydi (.env да HUMO_* qo'shsangiz avtomatik yoqiladi)")
+            print("ℹ️ HUMOcard sozlanmagan — faqat qo'lda to'lov tizimi ishlaydi "
+                  "(admin panel → Avtomatik to'lov → «Sessiyani bot orqali ulash» orqali sozlashingiz mumkin)")
     except Exception as e:
         print(f"⚠️ HUMOcard tinglovchisini ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
     try:
