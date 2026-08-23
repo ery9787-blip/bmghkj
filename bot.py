@@ -24,6 +24,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 import humo_listener
+import tolov_api
 
 from database import Database
 
@@ -65,6 +66,11 @@ class HumoSetupStates(StatesGroup):
     wait_phone   = State()
     wait_code    = State()
     wait_password = State()
+
+class TolovSetupStates(StatesGroup):
+    wait_shop_id  = State()
+    wait_shop_key = State()
+    wait_api_url  = State()
 
 class BalanceChangeState(StatesGroup):
     wait_user_id = State()
@@ -401,6 +407,49 @@ async def start_or_restart_humo_listener():
         )
     )
     return True
+
+# ─── TolovAPI (tolov.run.place) — UCHINCHI mustaqil avtomatik to'lov usuli ─
+# Telethon (o'zingiz sessiya ulaysiz) va webhook (tashqi xizmat sizga
+# so'rov yuboradi) dan farqli — bu yerda siz TolovAPI serveriga o'zingiz
+# davriy so'rov yuborasiz ("shu summa keldimi?"). Bunga sessiya yoki
+# ochiq port kerak emas — faqat shop_id va shop_key (TolovAPI'dan olinadi).
+TOLOV_API_URL_DEFAULT = tolov_api.TOLOV_API_URL_DEFAULT
+
+async def get_tolov_config() -> dict:
+    return {
+        "enabled": (await get_setting("tolov_api_enabled", "0")) == "1",
+        "api_url": await get_setting("tolov_api_url", TOLOV_API_URL_DEFAULT),
+        "shop_id": await get_setting("tolov_shop_id", ""),
+        "shop_key": await get_setting("tolov_shop_key", ""),
+    }
+
+async def is_tolov_configured() -> bool:
+    cfg = await get_tolov_config()
+    return bool(cfg["shop_id"] and cfg["shop_key"])
+
+_tolov_polling_task = None
+
+async def start_or_restart_tolov_polling():
+    """TolovAPI polling siklini (qayta) ishga tushiradi."""
+    global _tolov_polling_task
+    if _tolov_polling_task and not _tolov_polling_task.done():
+        _tolov_polling_task.cancel()
+        try:
+            await _tolov_polling_task
+        except Exception:
+            pass
+    if not await is_tolov_configured():
+        return False
+    _tolov_polling_task = asyncio.create_task(
+        tolov_api.tolov_polling_loop(
+            db, bot, ADMIN_ID, E,
+            get_config=get_tolov_config,
+            process_deposit_amount=humo_listener.process_deposit_amount,
+            log_event=log_event,
+        )
+    )
+    return True
+
 
 async def reserve_auto_amount(user_id: int, base_amount: int):
     """
@@ -1950,6 +1999,7 @@ async def admin_cmd(msg: Message):
         AdminSettingsState.wait_incomplete_hours, AdminSettingsState.wait_low_balance,
         HumoSetupStates.wait_api_id, HumoSetupStates.wait_api_hash, HumoSetupStates.wait_phone,
         HumoSetupStates.wait_code, HumoSetupStates.wait_password,
+        TolovSetupStates.wait_shop_id, TolovSetupStates.wait_shop_key, TolovSetupStates.wait_api_url,
     )
 )
 async def admin_cancel_any(msg: Message, state: FSMContext):
@@ -2658,6 +2708,13 @@ async def adm_autopay_cb(call: CallbackQuery):
         listener_status = "🟡 Sozlangan, lekin hozir ulanmagan (botni qayta ishga tushiring)"
     else:
         listener_status = "❌ Sozlanmagan"
+    tolov_cfg = await get_tolov_config()
+    if tolov_cfg["enabled"] and tolov_cfg["shop_id"]:
+        tolov_status = f"✅ Yoqilgan (shop_id: {tolov_cfg['shop_id']})"
+    elif tolov_cfg["shop_id"]:
+        tolov_status = "🟡 Sozlangan, lekin o'chirilgan"
+    else:
+        tolov_status = "❌ Sozlanmagan"
     auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
     text = (
         f"⚡ <b>Avtomatik to'lov sozlamalari</b>\n\n"
@@ -2666,10 +2723,12 @@ async def adm_autopay_cb(call: CallbackQuery):
         f"{f' ({card2_owner})' if card2_owner else ''}\n"
         f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
         f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
-        f"<b>Ikkita mustaqil (parallel) usul mavjud:</b>\n"
+        f"<b>Uchta mustaqil (parallel) usul mavjud:</b>\n"
         f"1️⃣ Telethon tinglovchi: <b>{listener_status}</b>\n"
         f"2️⃣ Webhook server: <b>✅ Har doim tayyor</b>\n"
-        f"<i>(tashqi xizmat — masalan karta SMS kuzatuvchi bot — sizga so'rov yuboradi)</i>"
+        f"<i>(tashqi xizmat — masalan karta SMS kuzatuvchi bot — sizga so'rov yuboradi)</i>\n"
+        f"3️⃣ TolovAPI (tolov.run.place): <b>{tolov_status}</b>\n"
+        f"<i>(siz o'zingiz shop_id/shop_key orqali davriy so'rov yuborasiz)</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button(("O'chirish" if auto_on else "Yoqish"), "rocket",
@@ -2677,12 +2736,139 @@ async def adm_autopay_cb(call: CallbackQuery):
         [ib_button("Sessiyani bot orqali ulash", "phone", style="primary", callback_data="setup_humo_session")],
         [ib_button("Holatni tekshirish", "search", callback_data="check_humo_status")],
         [ib_button("Webhook manzilini ko'rish", "link", callback_data="show_webhook_info")],
+        [ib_button("TolovAPI sozlash", "sparkle", style="primary", callback_data="adm_tolov_api")],
         [ib_button("2-karta raqamini sozlash", "card", callback_data="set_card2_number")],
         [ib_button("2-karta egasini sozlash", "profile", callback_data="set_card2_owner")],
         [ib_button("Urinishlar sonini o'zgartirish", "chart", callback_data="set_autopay_offset")],
         [ib_button("Kutish muddatini o'zgartirish", "clock", callback_data="set_autopay_expiry")],
         [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")],
     ])
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer()
+
+@admin_router.callback_query(F.data == "adm_tolov_api")
+async def adm_tolov_api_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    cfg = await get_tolov_config()
+    status_text = "✅ Yoqilgan" if cfg["enabled"] else "▫️ O'chirilgan"
+    text = (
+        f"{E('sparkle')} <b>TolovAPI sozlamalari</b>\n\n"
+        f"<i>tolov.run.place orqali avtomatik to'lov — sessiya yoki webhook "
+        f"kerak emas, faqat shop_id/shop_key orqali davriy tekshiriladi.</i>\n\n"
+        f"🔘 Holat: <b>{status_text}</b>\n"
+        f"🆔 Shop ID: <code>{cfg['shop_id'] or 'Sozlanmagan'}</code>\n"
+        f"🔑 Shop Key: <code>{'•' * len(cfg['shop_key']) if cfg['shop_key'] else 'Sozlanmagan'}</code>\n"
+        f"🌐 API manzili: <code>{cfg['api_url']}</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [ib_button(("O'chirish" if cfg["enabled"] else "Yoqish"), "rocket",
+                    style=("danger" if cfg["enabled"] else "success"), callback_data="toggle_tolov_api")],
+        [ib_button("Shop ID kiritish", "key", style="primary", callback_data="set_tolov_shop_id")],
+        [ib_button("Shop Key kiritish", "key", callback_data="set_tolov_shop_key")],
+        [ib_button("API manzilini o'zgartirish", "link", callback_data="set_tolov_api_url")],
+        [ib_button("Ulanishni tekshirish", "search", callback_data="check_tolov_status")],
+        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_autopay")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb)
+    await call.answer()
+
+@admin_router.callback_query(F.data == "set_tolov_shop_id")
+async def set_tolov_shop_id_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text(f"{E('key')} TolovAPI shop_id ni kiriting (tolov.run.place sayti bergan):")
+    await state.set_state(TolovSetupStates.wait_shop_id)
+    await call.answer()
+
+@admin_router.message(TolovSetupStates.wait_shop_id)
+async def set_tolov_shop_id_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await db.set_setting("tolov_shop_id", msg.text.strip())
+    await msg.answer(f"{E('check')} Shop ID saqlandi.")
+    await state.clear()
+    await show_admin_panel(msg)
+
+@admin_router.callback_query(F.data == "set_tolov_shop_key")
+async def set_tolov_shop_key_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text(f"{E('key')} TolovAPI shop_key ni kiriting:")
+    await state.set_state(TolovSetupStates.wait_shop_key)
+    await call.answer()
+
+@admin_router.message(TolovSetupStates.wait_shop_key)
+async def set_tolov_shop_key_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    await db.set_setting("tolov_shop_key", msg.text.strip())
+    await msg.answer(f"{E('check')} Shop Key saqlandi.")
+    await state.clear()
+    await show_admin_panel(msg)
+
+@admin_router.callback_query(F.data == "set_tolov_api_url")
+async def set_tolov_api_url_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != ADMIN_ID:
+        return
+    await call.message.edit_text(
+        f"{E('link')} TolovAPI manzilini kiriting (standart holda o'zgartirish shart emas):\n\n"
+        f"<code>{TOLOV_API_URL_DEFAULT}</code>"
+    )
+    await state.set_state(TolovSetupStates.wait_api_url)
+    await call.answer()
+
+@admin_router.message(TolovSetupStates.wait_api_url)
+async def set_tolov_api_url_apply(msg: Message, state: FSMContext):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    url = msg.text.strip()
+    if not url.startswith("http"):
+        return await msg.answer("❌ To'g'ri URL kiriting (http:// yoki https:// bilan boshlanishi kerak).")
+    await db.set_setting("tolov_api_url", url)
+    await msg.answer(f"{E('check')} API manzili saqlandi.")
+    await state.clear()
+    await show_admin_panel(msg)
+
+@admin_router.callback_query(F.data == "toggle_tolov_api")
+async def toggle_tolov_api_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    cfg = await get_tolov_config()
+    new_val = "0" if cfg["enabled"] else "1"
+    if new_val == "1":
+        if not (cfg["shop_id"] and cfg["shop_key"]):
+            await call.answer("❌ Avval Shop ID va Shop Key kiriting!", show_alert=True)
+            return
+        status = await tolov_api.check_status(cfg["api_url"], cfg["shop_id"], cfg["shop_key"])
+        if not status.get("ok"):
+            err_msg = status.get('error', "noma'lum xato")
+            await call.answer(f"❌ TolovAPI bilan bog'lanib bo'lmadi: {err_msg}", show_alert=True)
+            return
+        if not status.get("connected"):
+            await call.answer("⚠️ TolovAPI javob berdi, lekin do'kon ulanmagan (sessiya faol emas). Baribir yoqamiz.", show_alert=True)
+    await db.set_setting("tolov_api_enabled", new_val)
+    if new_val == "1":
+        await start_or_restart_tolov_polling()
+    await adm_tolov_api_cb(call)
+
+@admin_router.callback_query(F.data == "check_tolov_status")
+async def check_tolov_status_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    cfg = await get_tolov_config()
+    if not (cfg["shop_id"] and cfg["shop_key"]):
+        await call.answer("❌ Avval Shop ID va Shop Key kiriting!", show_alert=True)
+        return
+    result = await tolov_api.check_status(cfg["api_url"], cfg["shop_id"], cfg["shop_key"])
+    if result.get("ok") and result.get("connected"):
+        text = f"{E('check')} <b>TolovAPI ulangan va faol!</b>"
+    elif result.get("ok"):
+        text = f"{E('warn')} <b>TolovAPI javob berdi, lekin do'kon ulanmagan.</b>\nTolovAPI panelida sessiya holatini tekshiring."
+    else:
+        err_msg = result.get('error', "noma'lum xato")
+        text = f"{E('cross')} <b>Bog'lanib bo'lmadi:</b>\n<code>{err_msg}</code>"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", callback_data="adm_tolov_api")]])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
@@ -3223,6 +3409,16 @@ async def main():
                   "(admin panel → Avtomatik to'lov → «Sessiyani bot orqali ulash» orqali sozlashingiz mumkin)")
     except Exception as e:
         print(f"⚠️ HUMOcard tinglovchisini ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
+    try:
+        tolov_cfg = await get_tolov_config()
+        if tolov_cfg["enabled"] and tolov_cfg["shop_id"] and tolov_cfg["shop_key"]:
+            started = await start_or_restart_tolov_polling()
+            if started:
+                print("✅ TolovAPI polling sikli ishga tushirildi ✅")
+        else:
+            print("ℹ️ TolovAPI sozlanmagan yoki o'chirilgan — admin panel → Avtomatik to'lov → TolovAPI orqali sozlashingiz mumkin")
+    except Exception as e:
+        print(f"⚠️ TolovAPI polling siklini ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
     try:
         asyncio.create_task(reminder_loop())
         print("✅ Faollik eslatmalari sikli ishga tushirildi ✅")
