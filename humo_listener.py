@@ -222,11 +222,38 @@ async def start_humo_listener_with_creds(db, bot, admin_id: int, E, api_id: int,
 
     client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
 
-    @client.on(events.NewMessage(from_users=HUMO_BOT_USERNAME))
+    # DIQQAT: avval faqat HUMO_BOT_USERNAME dan kelgan xabarlarni tinglar
+    # edik — agar bu nom haqiqiy bot nomiga (yoki uning shaxsiy chat
+    # ko'rinishiga) mos kelmasa, xabar UMUMAN ko'rinmay qolar edi. Endi
+    # BARCHA kiruvchi shaxsiy xabarlarni tinglaymiz va faqat MATN
+    # SHAKLIGA qarab (parse_humocard_message orqali) ajratamiz — bot
+    # nomiga bog'liq emas, ancha ishonchli.
+    @client.on(events.NewMessage(incoming=True))
     async def _on_humo_message(event):
         try:
-            parsed = parse_humocard_message(event.raw_text)
-            if not parsed or parsed["type"] != "deposit":
+            if not event.is_private:
+                return  # guruh/kanal xabarlarini e'tiborsiz qoldiramiz
+            raw = event.raw_text or ""
+            parsed = parse_humocard_message(raw)
+            if not parsed:
+                # Agar xabar to'lovga o'xshab ko'rinsa (UZS/karta so'zlari bor),
+                # lekin bizning tahlilchimiz tanimasa — buni ANIQ ko'rish
+                # uchun XOM matnni kanalga chiqaramiz. Shu orqali qaysi
+                # so'zlar/shakl formatimizga mos kelmayotganini bilib olamiz.
+                looks_like_payment = any(k in raw.upper() for k in ["UZS", "HUMOCARD", "KARTA", "*"])
+                if looks_like_payment and log_event:
+                    try:
+                        await log_event(
+                            f"{E('warn')} <b>Tanib bo'lmagan xabar keldi</b> (to'lovga o'xshaydi, lekin format mos emas)\n\n"
+                            f"<pre>{raw[:500]}</pre>"
+                        )
+                    except Exception:
+                        pass
+                return  # bu umuman to'lov xabari emas (shakli mos kelmadi)
+            sender = await event.get_sender()
+            sender_name = getattr(sender, "username", None) or getattr(sender, "first_name", "noma'lum")
+            logger.info(f"📩 Xabar keldi ({sender_name}): {parsed['type']}, {parsed['amount']} so'm")
+            if parsed["type"] != "deposit":
                 return
             await process_deposit_amount(
                 db, bot, admin_id, E,
@@ -235,6 +262,14 @@ async def start_humo_listener_with_creds(db, bot, admin_id: int, E, api_id: int,
             )
         except Exception as e:
             logger.exception("HUMOcard xabarini qayta ishlashda xato: %s", e)
+
+    # Ba'zi bildirishnoma botlari yangi xabar yubormasdan, ESKI xabarni
+    # TAHRIRLAB (masalan "bugungi xulosa" xabarini yangilab) turishi
+    # mumkin — oddiy NewMessage buni ushlamaydi, shuning uchun
+    # MessageEdited hodisasini ham alohida tinglaymiz.
+    @client.on(events.MessageEdited(incoming=True))
+    async def _on_humo_message_edited(event):
+        await _on_humo_message(event)
 
     try:
         await client.start()
