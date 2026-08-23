@@ -177,23 +177,33 @@ async def process_deposit_amount(db, bot, admin_id: int, E, amount: int, card_la
     return True
 
 
-async def start_humo_listener(db, bot, admin_id: int, E, log_event=None):
-    """Botning main() ichidan asyncio.create_task() bilan chaqiriladi."""
-    if not HUMO_ENABLED:
-        logger.warning(
-            "HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING sozlanmagan — "
-            "avtomatik to'lov tinglovchisi ishga tushmadi (qo'lda chek tizimi ishlayveradi)."
-        )
-        return
+# ─── ULANISH HOLATINI KUZATISH ──────────────────────────────────
+# Admin panelda "Holatni tekshirish" tugmasi shu global o'zgaruvchidan
+# o'qiydi — shu bilan sessiya CHINDAN ulanganini, qaysi akkaunt ekanini
+# aniq ko'rish mumkin (taxmin qilishga hojat qolmaydi).
+_current_status = {"connected": False, "account": None, "phone": None, "error": None}
 
+def get_status() -> dict:
+    return dict(_current_status)
+
+
+async def start_humo_listener_with_creds(db, bot, admin_id: int, E, api_id: int, api_hash: str,
+                                          session_string: str, log_event=None):
+    """HUMOcard tinglovchisini berilgan (bazadan yoki .env dan olingan)
+    login ma'lumotlari bilan ishga tushiradi. Ulanish holatini
+    _current_status ga yozib boradi — shu orqali admin panel "Holatni
+    tekshirish" tugmasi orqali aniq bilib oladi."""
+    global _current_status
     try:
         from telethon import TelegramClient, events
-        from telethon.sessions import StringSession
     except ImportError:
+        _current_status = {"connected": False, "account": None, "phone": None,
+                            "error": "telethon o'rnatilmagan (pip install telethon)"}
         logger.error("telethon o'rnatilmagan — 'pip install telethon' qiling.")
         return
+    from telethon.sessions import StringSession
 
-    client = TelegramClient(StringSession(HUMO_SESSION_STRING), int(HUMO_API_ID), HUMO_API_HASH)
+    client = TelegramClient(StringSession(session_string), int(api_id), api_hash)
 
     @client.on(events.NewMessage(from_users=HUMO_BOT_USERNAME))
     async def _on_humo_message(event):
@@ -209,7 +219,34 @@ async def start_humo_listener(db, bot, admin_id: int, E, log_event=None):
         except Exception as e:
             logger.exception("HUMOcard xabarini qayta ishlashda xato: %s", e)
 
-    await client.start()
-    logger.info("✅ HUMOcard avtomatik to'lov tinglovchisi ishga tushdi.")
-    async with client:
-        await client.run_until_disconnected()
+    try:
+        await client.start()
+        me = await client.get_me()
+        account_name = f"{me.first_name} (@{me.username})" if me.username else (me.first_name or "Noma'lum")
+        _current_status = {"connected": True, "account": account_name, "phone": me.phone, "error": None}
+        logger.info(f"✅ HUMOcard tinglovchisi ulandi: {account_name}")
+        async with client:
+            await client.run_until_disconnected()
+    except Exception as e:
+        _current_status = {"connected": False, "account": None, "phone": None, "error": str(e)}
+        logger.exception("HUMOcard sessiyasiga ulanishda xatolik: %s", e)
+    finally:
+        _current_status["connected"] = False
+
+
+async def start_humo_listener(db, bot, admin_id: int, E, log_event=None):
+    """Botning main() ichidan asyncio.create_task() bilan chaqiriladi.
+    .env dagi HUMO_* o'zgaruvchilaridan foydalanadi (eski usul, hali ham
+    qo'llab-quvvatlanadi). Bazadan (admin panel orqali) sozlangan bo'lsa,
+    bot.py o'rniga start_or_restart_humo_listener() dan foydalanadi."""
+    if not HUMO_ENABLED:
+        logger.warning(
+            "HUMO_API_ID / HUMO_API_HASH / HUMO_SESSION_STRING sozlanmagan — "
+            "avtomatik to'lov tinglovchisi ishga tushmadi (qo'lda chek tizimi ishlayveradi)."
+        )
+        return
+    await start_humo_listener_with_creds(
+        db, bot, admin_id, E,
+        api_id=int(HUMO_API_ID), api_hash=HUMO_API_HASH, session_string=HUMO_SESSION_STRING,
+        log_event=log_event
+    )
