@@ -9,6 +9,8 @@ O'rnatish:
     DATABASE_URL=postgresql://user:password@host:5432/dbname
 """
 
+from __future__ import annotations  # Python 3.9 va undan eskilarida ham
+                                     # "int | None" kabi sintaksis ishlashi uchun
 import os
 import asyncpg
 from datetime import datetime
@@ -61,6 +63,15 @@ class Database:
                     UNIQUE(referrer_id, referred_id)
                 )
             """)
+            # "status" — referal HAQIQIY hisoblanadimi: 'active' (to'liq
+            # ro'yxatdan o'tgan + kanalga a'zo) yoki 'inactive' (keyinchalik
+            # botni bloklagan yoki kanaldan chiqib ketgan — shunday holatda
+            # yozuv o'chirilmaydi, faqat "nofaol" deb belgilanadi, shu bilan
+            # hisoblashda -1 sifatida ta'sir qiladi, lekin tarix saqlanadi).
+            try:
+                await conn.execute("ALTER TABLE referrals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'")
+            except Exception as e:
+                print(f"⚠️ referrals jadvalini yangilashda xatolik: {e}")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS purchases (
                     id           SERIAL PRIMARY KEY,
@@ -319,16 +330,53 @@ class Database:
 
     # ─── REFERRALS ─────────────────────────────────────────────
     async def add_referral(self, referrer_id: int, referred_id: int):
+        """Yangi referalni FAOL holatda qo'shadi. Bu FAQAT foydalanuvchi
+        to'liq ro'yxatdan o'tgan (telefon tasdiqlagan) VA majburiy kanalga
+        a'zo bo'lgan taqdirdagina chaqirilishi kerak — shu tekshiruv
+        bot.py tomonida amalga oshiriladi."""
         async with self.pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO referrals (referrer_id, referred_id)
-                VALUES ($1, $2) ON CONFLICT DO NOTHING
+                INSERT INTO referrals (referrer_id, referred_id, status)
+                VALUES ($1, $2, 'active')
+                ON CONFLICT (referrer_id, referred_id) DO UPDATE SET status = 'active'
             """, referrer_id, referred_id)
+
+    async def deactivate_referral(self, referred_id: int) -> int | None:
+        """Referal qilingan odam botni bloklasa yoki kanaldan chiqib
+        ketsa chaqiriladi — yozuvni o'chirmaydi, faqat 'inactive' deb
+        belgilaydi (shu bilan referrer hisobida -1 bo'lib ko'rinadi).
+        Qaytaradi: referrer_id (agar shunday faol referal topilgan bo'lsa)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE referrals SET status = 'inactive'
+                WHERE referred_id = $1 AND status = 'active'
+                RETURNING referrer_id
+            """, referred_id)
+            return row["referrer_id"] if row else None
+
+    async def reactivate_referral(self, referred_id: int) -> int | None:
+        """Agar avval nofaol bo'lib qolgan odam qaytadan kanalga a'zo
+        bo'lsa/botni blokdan chiqarsa — referalni qaytadan faollashtiradi."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                UPDATE referrals SET status = 'active'
+                WHERE referred_id = $1 AND status = 'inactive'
+                RETURNING referrer_id
+            """, referred_id)
+            return row["referrer_id"] if row else None
+
+    async def get_active_referred_user_ids(self):
+        """Hozir 'active' deb belgilangan barcha taklif qilingan
+        foydalanuvchi ID'larini qaytaradi — davriy tekshiruv
+        (kanaldan chiqib ketganmi) uchun ishlatiladi."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT referred_id FROM referrals WHERE status = 'active'")
+            return [r["referred_id"] for r in rows]
 
     async def get_referral_count(self, user_id: int) -> int:
         async with self.pool.acquire() as conn:
             return await conn.fetchval(
-                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1", user_id
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND status = 'active'", user_id
             )
 
     async def get_referral_earnings(self, user_id: int) -> int:
@@ -341,7 +389,8 @@ class Database:
             return int(val)
 
     async def get_referral_leaderboard(self, period: str = "all", limit: int = 10):
-        """Kim eng ko'p odam taklif qilganini ko'rsatadigan reyting.
+        """Kim eng ko'p odam taklif qilganini ko'rsatadigan reyting —
+        faqat FAOL (hali botda, kanalga a'zo) referallar hisoblanadi.
         period: 'week' | 'month' | 'year' | 'all'."""
         interval_map = {"week": "7 days", "month": "30 days", "year": "365 days"}
         async with self.pool.acquire() as conn:
@@ -350,7 +399,7 @@ class Database:
                     SELECT r.referrer_id, COUNT(*) AS cnt, u.fullname, u.username
                     FROM referrals r
                     LEFT JOIN users u ON u.user_id = r.referrer_id
-                    WHERE r.created_at > NOW() - INTERVAL '{interval_map[period]}'
+                    WHERE r.status = 'active' AND r.created_at > NOW() - INTERVAL '{interval_map[period]}'
                     GROUP BY r.referrer_id, u.fullname, u.username
                     ORDER BY cnt DESC
                     LIMIT $1
@@ -360,6 +409,7 @@ class Database:
                     SELECT r.referrer_id, COUNT(*) AS cnt, u.fullname, u.username
                     FROM referrals r
                     LEFT JOIN users u ON u.user_id = r.referrer_id
+                    WHERE r.status = 'active'
                     GROUP BY r.referrer_id, u.fullname, u.username
                     ORDER BY cnt DESC
                     LIMIT $1
@@ -368,15 +418,15 @@ class Database:
 
     async def get_referral_rank(self, user_id: int, period: str = "all") -> tuple:
         """Berilgan foydalanuvchining reytingdagi o'rnini va shu davrdagi
-        taklif sonini qaytaradi: (o'rin, soni). Agar hech kimni taklif
-        qilmagan bo'lsa (0, 0) qaytaradi."""
+        (FAOL) taklif sonini qaytaradi: (o'rin, soni). Agar hech kimni
+        taklif qilmagan bo'lsa (0, 0) qaytaradi."""
         interval_map = {"week": "7 days", "month": "30 days", "year": "365 days"}
-        where_clause = f"WHERE created_at > NOW() - INTERVAL '{interval_map[period]}'" if period in interval_map else ""
+        where_extra = f"AND created_at > NOW() - INTERVAL '{interval_map[period]}'" if period in interval_map else ""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(f"""
                 SELECT referrer_id, COUNT(*) AS cnt
                 FROM referrals
-                {where_clause}
+                WHERE status = 'active' {where_extra}
                 GROUP BY referrer_id
                 ORDER BY cnt DESC
             """)
@@ -580,6 +630,18 @@ class Database:
             rows = await conn.fetch(
                 "SELECT * FROM auto_payments WHERE status = 'pending' AND expires_at > NOW() "
                 "ORDER BY created_at ASC"
+            )
+            return [dict(r) for r in rows]
+
+    async def get_user_pending_auto_payments(self, user_id: int):
+        """Bitta foydalanuvchining hozir 'pending' bo'lgan (muddati
+        o'tmagan) avtomatik to'lovlarini qaytaradi — admin panelda
+        "qoldi to'lovni bekor qilish" funksiyasi uchun."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM auto_payments WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW() "
+                "ORDER BY created_at DESC",
+                user_id
             )
             return [dict(r) for r in rows]
 
