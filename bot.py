@@ -16,7 +16,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
     Message, CallbackQuery, TelegramObject,
-    ReplyKeyboardRemove,
+    ReplyKeyboardRemove, ChatMemberUpdated,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -287,6 +287,39 @@ async def reminder_loop():
         except Exception as e:
             print(f"⚠️ Eslatmalarni yuborishda xatolik: {e}")
         await asyncio.sleep(REMINDER_CHECK_INTERVAL_SEC)
+
+# ─── REFERALLARNI OBUNAGA QARAB TEKSHIRISH ──────────────────────
+REFERRAL_CHECK_INTERVAL_SEC = 6 * 60 * 60  # har 6 soatda
+
+async def referral_subscription_check_loop():
+    """Fonda doim ishlaydigan sikl — hozir 'faol' deb hisoblangan barcha
+    referallarning hali ham majburiy kanalga a'zoligini tekshiradi. Agar
+    kimdir kanaldan chiqib ketgan bo'lsa, uni taklif qilgan odamning
+    referal soni avtomatik -1 bo'ladi (yozuv o'chirilmaydi, faqat
+    "nofaol" deb belgilanadi)."""
+    while True:
+        try:
+            active_ids = await db.get_active_referred_user_ids()
+            deactivated = 0
+            for uid in active_ids:
+                try:
+                    still_subscribed = await check_subscription(uid)
+                except Exception:
+                    continue  # vaqtinchalik xato — keyingi tekshiruvda qayta urinamiz
+                if not still_subscribed:
+                    referrer_id = await db.deactivate_referral(uid)
+                    if referrer_id:
+                        deactivated += 1
+                        await log_event(
+                            f"{E('cross')} <b>Referal nofaol bo'ldi</b> (foydalanuvchi kanaldan chiqib ketgan)\n\n"
+                            f"{E('profile')} Referrer: <code>{referrer_id}</code>\n"
+                            f"{E('profile')} Foydalanuvchi: <code>{uid}</code>"
+                        )
+            if deactivated:
+                print(f"🔻 {deactivated} ta referal kanaldan chiqib ketganligi sababli nofaol qilindi.")
+        except Exception as e:
+            print(f"⚠️ Referal obunasini tekshirishda xatolik: {e}")
+        await asyncio.sleep(REFERRAL_CHECK_INTERVAL_SEC)
 
 # ─── WEBHOOK ORQALI AVTOMATIK TO'LOV (ixtiyoriy, qo'shimcha yo'l) ──
 # Ba'zan (masalan @LockAvtoPayBot kabi) tashqi xizmatlar karta SMS
@@ -875,6 +908,40 @@ class UserActivityMiddleware(BaseMiddleware):
 router.message.middleware(UserActivityMiddleware())
 router.callback_query.middleware(UserActivityMiddleware())
 
+# ─── BOTNI BLOKLASH/BLOKDAN CHIQARISHNI KUZATISH ────────────────
+# Telegram foydalanuvchi botni bloklaganda yoki blokdan chiqarganda
+# my_chat_member hodisasini yuboradi. Buni referal hisobini avtomatik
+# to'g'irlash uchun ishlatamiz: agar taklif qilingan odam botni
+# bloklasa, uni taklif qilgan odamning FAOL referal soni -1 bo'ladi
+# (yozuv o'chirilmaydi, faqat "nofaol" deb belgilanadi).
+@router.my_chat_member()
+async def on_bot_blocked_or_unblocked(update: ChatMemberUpdated):
+    if update.chat.type != "private":
+        return
+    user_id = update.chat.id
+    new_status = update.new_chat_member.status
+    try:
+        if new_status in ("kicked", "left"):
+            # Foydalanuvchi botni bloklagan
+            referrer_id = await db.deactivate_referral(user_id)
+            if referrer_id:
+                await log_event(
+                    f"{E('cross')} <b>Referal nofaol bo'ldi</b> (foydalanuvchi botni bloklagan)\n\n"
+                    f"{E('profile')} Referrer: <code>{referrer_id}</code>\n"
+                    f"{E('profile')} Bloklagan: <code>{user_id}</code>"
+                )
+        elif new_status == "member":
+            # Foydalanuvchi botni blokdan chiqargan / qayta ishga tushirgan
+            referrer_id = await db.reactivate_referral(user_id)
+            if referrer_id:
+                await log_event(
+                    f"{E('check')} <b>Referal qayta faollashdi</b> (foydalanuvchi botni blokdan chiqargan)\n\n"
+                    f"{E('profile')} Referrer: <code>{referrer_id}</code>\n"
+                    f"{E('profile')} Foydalanuvchi: <code>{user_id}</code>"
+                )
+    except Exception as e:
+        print(f"⚠️ my_chat_member hodisasini qayta ishlashda xatolik: {e}")
+
 # ══════════════════════════════════════════════════════════════
 #  TO'LOVNI TASDIQLASH (admin qo'lda tasdiqlaydi)
 # ══════════════════════════════════════════════════════════════
@@ -1062,24 +1129,18 @@ async def autopay_amount_received(msg: Message, state: FSMContext):
         ])
         await state.update_data(auto_payment_id=reservation["payment_id"])
 
-        offset_note = ""
-        if offset != 0:
-            sign = "+" if offset > 0 else ""
-            offset_note = (
-                f"\n{E('warn')} <b>Diqqat!</b> Xavfsizlik uchun summangizga tasodifiy son qo'shildi — "
-                f"aniq <b>{final_amount:,} so'm</b> yuborishingiz kerak ({sign}{offset:,} so'm farq bilan) — "
-                f"faqat shu ANIQ summa avtomatik aniqlanadi!\n"
-            )
-
         await msg.answer(
             f"{E('receipt')} <b>To'lov ma'lumotlari</b>\n\n"
-            f"{E('money')} Yuboriladigan ANIQ summa: <b>{final_amount:,} so'm</b>\n"
             f"{E('card')} Karta raqami: <code>{reservation['card_number']}</code>\n"
-            f"{E('profile')} Karta egasi: <b>{reservation['card_owner']}</b>\n"
-            f"{offset_note}\n"
+            f"{E('profile')} Karta egasi: <b>{reservation['card_owner']}</b>\n\n"
+            f"<blockquote><b>❗️❗️❗️ FAQAT VA FAQAT quyidagi ANIQ summani yuboring:</b>\n\n"
+            f"👉 <b>{final_amount:,} so'm</b> 👈\n\n"
+            f"<b>Boshqa summa (masalan {amount:,} so'm yoki boshqa dumaloq son) yuborsangiz — "
+            f"bot buni AVTOMATIK ANIQLAY OLMAYDI va pulingiz balansga tushmaydi!</b></blockquote>\n\n"
             f"{E('rocket')} Pul kartaga tushishi bilan, balansingiz {reservation['expiry_min']} daqiqa ichida "
             f"AVTOMATIK to'ldiriladi — chek yuborish shart emas!\n\n"
-            f"{E('hourglass')} <i>{reservation['expiry_min']} daqiqa ichida pul tushmasa, bu band bekor bo'ladi.</i>",
+            f"{E('hourglass')} <i>{reservation['expiry_min']} daqiqa ichida pul tushmasa, bu band bekor bo'ladi.</i>\n\n"
+            f"{E('warn')} <b>Yana bir bor: aynan {final_amount:,} so'm, 1 tiyin ham ko'p yoki kam emas!</b>",
             reply_markup=kb
         )
         await state.clear()
@@ -1433,7 +1494,7 @@ async def phone_received(msg: Message, state: FSMContext):
     if is_new:
         await notify_new_member(msg.from_user, referrer_id)
 
-    if referrer_id and referrer_id != user_id and not already_had_phone:
+    if referrer_id and referrer_id != user_id and not already_had_phone and await check_subscription(user_id):
         if phone.startswith("+998"):
             ref_bonus = int(await get_setting("referral_bonus", 500))
             await db.update_balance(referrer_id, ref_bonus)
@@ -2060,6 +2121,9 @@ async def adm_leaderboard_cb(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         return
     period = call.data.split(":")[1]
+    await render_leaderboard(call, period)
+
+async def render_leaderboard(call: CallbackQuery, period: str):
     period_labels = {"week": "Haftalik", "month": "Oylik", "year": "Yillik", "all": "Umumiy"}
     rows = await db.get_referral_leaderboard(period=period, limit=15)
 
@@ -2099,8 +2163,7 @@ async def toggle_leaderboard_public_cb(call: CallbackQuery):
     await db.set_setting("leaderboard_public", new_val)
     msg = "✅ Endi barcha foydalanuvchilar reytingni ko'ra oladi!" if new_val == "1" else "🚫 Reyting endi faqat admin uchun."
     await call.answer(msg, show_alert=True)
-    call.data = "adm_leaderboard:all"
-    await adm_leaderboard_cb(call)
+    await render_leaderboard(call, "all")
 
 @admin_router.callback_query(F.data.startswith("adm_users"))
 async def adm_users(call: CallbackQuery):
@@ -2140,7 +2203,9 @@ async def adm_user_view(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID:
         return
     _, uid_str, page = call.data.split(":")
-    uid = int(uid_str)
+    await render_user_view(call, int(uid_str), page)
+
+async def render_user_view(call: CallbackQuery, uid: int, page: str):
     u = await db.get_user(uid)
     if not u:
         await call.answer("Foydalanuvchi topilmadi.", show_alert=True)
@@ -2149,6 +2214,12 @@ async def adm_user_view(call: CallbackQuery):
     status = "🚫 Bloklangan" if u["is_blocked"] else "✅ Faol"
     last_active = u.get("last_active")
     display_name = u['fullname'] or "Noma'lum"
+    pending_payments = await db.get_user_pending_auto_payments(uid)
+    pending_part = ""
+    if pending_payments:
+        pending_part = f"\n\n{E('hourglass')} <b>Kutilayotgan to'lov(lar):</b>\n"
+        for p in pending_payments:
+            pending_part += f"  • {p['final_amount']:,} so'm (ID: {p['id']})\n"
     text = (
         f"{E('profile')} <b>{display_name}</b>\n\n"
         f"🆔 Tartib: {u['tartib_id']} | Telegram ID: <code>{u['user_id']}</code>\n"
@@ -2160,18 +2231,42 @@ async def adm_user_view(call: CallbackQuery):
         f"📌 Holat: <b>{status}</b>\n"
         f"⏰ Oxirgi faollik: {last_active.strftime('%d.%m.%Y %H:%M') if last_active else '—'}\n"
         f"📅 Ro'yxatdan o'tgan: {u['created_at'].strftime('%d.%m.%Y') if u.get('created_at') else '—'}"
+        f"{pending_part}"
     )
     block_btn = (
         ib_button("Blokdan chiqarish", "check", style="success", callback_data=f"adm_unblock:{uid}:{page}")
         if u["is_blocked"] else
         ib_button("Bloklash", "cross", style="danger", callback_data=f"adm_block:{uid}:{page}")
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [block_btn],
-        [ib_button("Orqaga", "arrow_l", callback_data=f"adm_users:{page}")],
-    ])
+    kb_rows = [[block_btn]]
+    for p in pending_payments:
+        kb_rows.append([ib_button(
+            f"Bekor qilish: {p['final_amount']:,} so'm", "cross", style="danger",
+            callback_data=f"adm_cancel_pay:{p['id']}:{uid}:{page}"
+        )])
+    kb_rows.append([ib_button("Orqaga", "arrow_l", callback_data=f"adm_users:{page}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+@admin_router.callback_query(F.data.startswith("adm_cancel_pay:"))
+async def adm_cancel_pay_cb(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+    _, payment_id_str, uid_str, page = call.data.split(":")
+    payment_id = int(payment_id_str)
+    uid = int(uid_str)
+    await db.cancel_auto_payment(payment_id)
+    try:
+        await bot.send_message(
+            uid,
+            f"{E('cross')} Kutilayotgan to'lovingiz admin tomonidan bekor qilindi.\n"
+            f"Savolingiz bo'lsa, qo'llab-quvvatlash xizmatiga murojaat qiling."
+        )
+    except Exception:
+        pass
+    await call.answer(f"{E('check')} To'lov bekor qilindi.", show_alert=True)
+    await render_user_view(call, uid, page)
 
 @admin_router.callback_query(F.data.startswith("adm_block:"))
 async def adm_block_user(call: CallbackQuery):
@@ -2185,8 +2280,7 @@ async def adm_block_user(call: CallbackQuery):
     except Exception:
         pass
     await call.answer(f"{E('check')} Bloklandi.", show_alert=True)
-    call.data = f"adm_user_view:{uid}:{page}"
-    await adm_user_view(call)
+    await render_user_view(call, uid, page)
 
 @admin_router.callback_query(F.data.startswith("adm_unblock:"))
 async def adm_unblock_user(call: CallbackQuery):
@@ -2200,8 +2294,7 @@ async def adm_unblock_user(call: CallbackQuery):
     except Exception:
         pass
     await call.answer(f"{E('check')} Blokdan chiqarildi.", show_alert=True)
-    call.data = f"adm_user_view:{uid}:{page}"
-    await adm_user_view(call)
+    await render_user_view(call, uid, page)
 
 # ─── KUNLIK HISOBOT (foyda / zarar) ─────────────────────────────
 @admin_router.callback_query(F.data == "adm_daily_report")
@@ -3433,6 +3526,11 @@ async def main():
         print("✅ Faollik eslatmalari sikli ishga tushirildi ✅")
     except Exception as e:
         print(f"⚠️ Eslatmalar siklini ishga tushirishda xatolik: {e}")
+    try:
+        asyncio.create_task(referral_subscription_check_loop())
+        print("✅ Referal obuna tekshiruvi sikli ishga tushirildi ✅")
+    except Exception as e:
+        print(f"⚠️ Referal tekshiruvi siklini ishga tushirishda xatolik: {e}")
     try:
         await start_webhook_server()
     except Exception as e:
