@@ -167,7 +167,7 @@ async def notify_new_member(user, referrer_id: int | None):
         f"{E('profile')} Ism: <b>{user.full_name}</b>\n"
         f"{username_part}\n"
         f"🆔 Telegram ID: <code>{user.id}</code>\n"
-        f"🌐 Til: {user.language_code or '—'}"
+        f"{E('globe')} Til: {user.language_code or '—'}"
         f"{ref_part}"
     )
     await log_event(text)
@@ -634,6 +634,9 @@ PREMIUM_EMOJI_SLUGS = {
     "gear":      "⚙️",
     "search":    "🔍",
     "report":    "📅",
+    "green":     "🟢",
+    "refresh":   "🔄",
+    "announce":  "📢",
 }
 
 PREMIUM_EMOJI_CACHE: dict[str, str] = {}
@@ -743,7 +746,7 @@ async def emojis_list_cmd(msg: Message):
     lines = [f"{E('sparkle')} <b>Premium emoji sozlamalari</b>\n"]
     for slug, fallback in PREMIUM_EMOJI_SLUGS.items():
         bound = PREMIUM_EMOJI_CACHE.get(slug)
-        status = f"✅ bog'langan (<code>{bound}</code>)" if bound else "▫️ oddiy emoji"
+        status = f"{E('check')} bog'langan (<code>{bound}</code>)" if bound else "▫️ oddiy emoji"
         lines.append(f"{fallback} <code>{slug}</code> — {status}")
     lines.append(
         "\nQanday bog'lash kerak:\n"
@@ -1092,7 +1095,7 @@ async def topup_auto_cb(call: CallbackQuery, state: FSMContext):
         print("‼️ topup_auto_cb XATOLIK:")
         traceback.print_exc()
         try:
-            await call.message.answer(f"⚠️ Texnik xatolik: <code>{type(e).__name__}: {e}</code>")
+            await call.message.answer(f"{E('warn')} Texnik xatolik: <code>{type(e).__name__}: {e}</code>")
         except Exception:
             pass
     await call.answer()
@@ -1134,7 +1137,7 @@ async def autopay_amount_received(msg: Message, state: FSMContext):
             f"{E('card')} Karta raqami: <code>{reservation['card_number']}</code>\n"
             f"{E('profile')} Karta egasi: <b>{reservation['card_owner']}</b>\n\n"
             f"<blockquote><b>❗️❗️❗️ FAQAT VA FAQAT quyidagi ANIQ summani yuboring:</b>\n\n"
-            f"👉 <b>{final_amount:,} so'm</b> 👈\n\n"
+            f"{E('point')} <b>{final_amount:,} so'm</b> 👈\n\n"
             f"<b>Boshqa summa (masalan {amount:,} so'm yoki boshqa dumaloq son) yuborsangiz — "
             f"bot buni AVTOMATIK ANIQLAY OLMAYDI va pulingiz balansga tushmaydi!</b></blockquote>\n\n"
             f"{E('rocket')} Pul kartaga tushishi bilan, balansingiz {reservation['expiry_min']} daqiqa ichida "
@@ -1151,7 +1154,7 @@ async def autopay_amount_received(msg: Message, state: FSMContext):
         traceback.print_exc()
         try:
             await msg.answer(
-                f"⚠️ Texnik xatolik yuz berdi: <code>{type(e).__name__}: {e}</code>\n\n"
+                f"{E('warn')} Texnik xatolik yuz berdi: <code>{type(e).__name__}: {e}</code>\n\n"
                 f"Iltimos bu xabarni skrinshot qilib adminга/dasturchiga yuboring.",
                 reply_markup=build_main_menu()
             )
@@ -1372,8 +1375,8 @@ async def check_subscription(user_id: int) -> bool:
 async def get_sub_kb():
     ch_un = await get_setting("required_channel_username", CHANNEL_USERNAME)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔔 Kanalga obuna bo'lish", url=f"https://t.me/{ch_un}")],
-        [InlineKeyboardButton(text="✅ Obuna bo'ldim", callback_data="check_sub")]
+        [ib_button("Kanalga obuna bo'lish", "bell", url=f"https://t.me/{ch_un}")],
+        [ib_button("Obuna bo'ldim", "check", style="success", callback_data="check_sub")]
     ])
 
 def welcome_text(first_name: str) -> str:
@@ -1539,9 +1542,9 @@ async def show_balance(msg: Message):
         f"Hisobingizni to'ldirib, xizmatlardan bemalol foydalanishda davom eting {E('fire')}"
     )
     orders_channel = await get_setting("orders_channel_username", "")
-    buttons = [[InlineKeyboardButton(text="💳 Hisob to'ldirish", callback_data="goto_topup")]]
+    buttons = [[ib_button("Hisob to'ldirish", "card", style="primary", callback_data="goto_topup")]]
     if orders_channel:
-        buttons.append([InlineKeyboardButton(text="📦 Buyurtmalar kanali", url=f"https://t.me/{orders_channel}")])
+        buttons.append([ib_button("Buyurtmalar kanali", "package", url=f"https://t.me/{orders_channel}")])
     await msg.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data == "goto_topup")
@@ -1639,7 +1642,7 @@ async def top10_countries(call: CallbackQuery):
             f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
+    buttons.append([ib_button("Orqaga", "arrow_l", style="danger", callback_data="countries_page:0")])
     await call.message.edit_text(f"{E('chart')} <b>TOP 10 davlat (raqamlar soni bo'yicha):</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
@@ -1663,7 +1666,7 @@ async def cheap_countries(call: CallbackQuery):
             f"{name} {flag} — {uzs_price:,} so'm -| {qty} dona", "phone",
             callback_data=f"buy:{code}:{uzs_price}"
         )])
-    buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="countries_page:0")])
+    buttons.append([ib_button("Orqaga", "arrow_l", style="danger", callback_data="countries_page:0")])
     await call.message.edit_text(f"{E('fire')} <b>Eng arzon raqamlar:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
@@ -1690,7 +1693,7 @@ async def buy_number(call: CallbackQuery):
     bal = await db.get_balance(user_id)
     if bal < uzs_price:
         return await call.answer(
-            f"❌ Hisobingizda mablag' yetarli emas.\n"
+            f"{E('cross')} Hisobingizda mablag' yetarli emas.\n"
             f"Raqam narxi: {uzs_price:,} so'm\nSizning balansingiz: {bal:,} so'm",
             show_alert=True
         )
@@ -1704,8 +1707,8 @@ async def buy_number(call: CallbackQuery):
         f"<blockquote>❗️ Diqqat: Botdan olingan raqamlar uchun hech qanday kafolat berilmaydi va pul qaytarilmaydi!</blockquote>\n\n"
         f"<blockquote>📌 Rasmiy Telegramdan olmang!!!\n"
         f"Agar siz rasmiy Telegram ilovasidan foydalansangiz, pulingiz 100% kuyadi va bu uchun bot va admin javobgar emas!\n"
-        f"Faqat 🟢 Telegraph yoki Plus kabi ilovalardan foydalanish tavsiya etiladi!!!</blockquote>\n\n"
-        f"{E('point')} Shartlar bilan to'liq tanishib chiqing va \"🛒 Sotib olish\" tugmasini bosing!"
+        f"Faqat {E('green')} Telegraph yoki Plus kabi ilovalardan foydalanish tavsiya etiladi!!!</blockquote>\n\n"
+        f"{E('point')} Shartlar bilan to'liq tanishib chiqing va \"{E('cart')} Sotib olish\" tugmasini bosing!"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button("Sotib olish", "cart", style="success", callback_data=f"terms:{country_code}:{uzs_price}")],
@@ -1739,8 +1742,8 @@ async def buy_terms(call: CallbackQuery):
         "👍 Qoidalar bilan tanishib chiqing va \"🟢 Davom etish\" tugmasini bosing!"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Davom etish", callback_data=f"confirm_buy:{country_code}:{uzs_price}")],
-        [InlineKeyboardButton(text="🚫 Bekor qilish", callback_data="countries_page:0")]
+        [ib_button("Davom etish", "green", style="success", callback_data=f"confirm_buy:{country_code}:{uzs_price}")],
+        [ib_button("Bekor qilish", "cross", style="danger", callback_data="countries_page:0")]
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
@@ -1778,7 +1781,7 @@ async def confirm_buy(call: CallbackQuery):
                 f"{E('cross')} Raqam olishda xatolik yuz berdi: {err}\n\n"
                 f"Mablag'ingiz hisobingizdan yechilmadi — istasangiz qayta urinib ko'rishingiz mumkin.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Davlatlar ro'yxatiga qaytish", callback_data="countries_page:0")]
+                    [ib_button("Davlatlar ro'yxatiga qaytish", "arrow_l", callback_data="countries_page:0")]
                 ])
             )
             await call.answer()
@@ -1806,15 +1809,15 @@ async def confirm_buy(call: CallbackQuery):
         except Exception:
             pass
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔑 SMS kodni olish", callback_data=f"getcode:{number}")],
-            [InlineKeyboardButton(text="🛒 Buyurtmalarim", callback_data="my_orders_inline")],
+            [ib_button("SMS kodni olish", "key", style="primary", callback_data=f"getcode:{number}")],
+            [ib_button("Buyurtmalarim", "cart", callback_data="my_orders_inline")],
         ])
         await call.message.edit_text(
             f"{E('check')} <b>Raqam muvaffaqiyatli olindi!</b>\n\n"
             f"{E('phone')} Raqamingiz: <code>{number}</code>\n"
             f"{E('money')} Narxi: {uzs_price:,} so'm\n\n"
             f"{E('warn')} Faqat norasmiy (Telegraph kabi) ilovalardan foydalaning.\n\n"
-            f"{E('sparkle')} Kirish kodini olish uchun pastdagi «🔑 SMS kodni olish» tugmasini bosing.",
+            f"{E('sparkle')} Kirish kodini olish uchun pastdagi «{E('key')} SMS kodni olish» tugmasini bosing.",
             reply_markup=kb
         )
     await call.answer()
@@ -1836,16 +1839,16 @@ async def get_code(call: CallbackQuery):
     if result.get("status") != "ok":
         err = result.get("message", "Noma'lum xato")
         kb  = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Qayta urinish", callback_data=f"getcode:{number}")]
+            [ib_button("Qayta urinish", "refresh", style="primary", callback_data=f"getcode:{number}")]
         ])
-        return await call.message.edit_text(f"❌ Kod olishda xatolik: {err}\n\nBiroz kutib, qayta urinib ko'ring.", reply_markup=kb)
+        return await call.message.edit_text(f"{E('cross')} Kod olishda xatolik: {err}\n\nBiroz kutib, qayta urinib ko'ring.", reply_markup=kb)
     code     = result.get("code", "Topilmadi")
     password = result.get("pass", "")
-    text = f"📨 <b>{number}</b> raqami uchun kod:\n\n🔑 Kirish kodi: <code>{code}</code>\n"
+    text = f"📨 <b>{number}</b> raqami uchun kod:\n\n{E('key')} Kirish kodi: <code>{code}</code>\n"
     if password:
-        text += f"🔐 2-bosqichli parol: <code>{password}</code>\n"
+        text += f"{E('admin')} 2-bosqichli parol: <code>{password}</code>\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Yangi kod olish", callback_data=f"getcode:{number}")]
+        [ib_button("Yangi kod olish", "refresh", style="primary", callback_data=f"getcode:{number}")]
     ])
     await call.message.edit_text(text, reply_markup=kb)
 
@@ -1857,7 +1860,7 @@ async def my_orders(msg: Message, override_user_id: int | None = None):
     if not orders:
         await msg.answer("🛒 Siz hali raqam sotib olmagansiz.\n📞 Raqam olish uchun «📞 Nomer olish» tugmasini bosing.")
         return
-    await msg.answer(f"🛒 <b>Sizning buyurtmalaringiz ({len(orders)} ta):</b>")
+    await msg.answer(f"{E('cart')} <b>Sizning buyurtmalaringiz ({len(orders)} ta):</b>")
     for i, order in enumerate(orders[:20], 1):
         phone       = order['phone']
         country     = clean_country_name(order['country_name'])
@@ -1874,12 +1877,12 @@ async def my_orders(msg: Message, override_user_id: int | None = None):
             formatted = str(bought_date)
         text = (
             f"<b>{i}. 🌍 {country} {flag}</b>\n"
-            f"📞 <code>{phone}</code>\n"
-            f"💰 Narx: {price:,} so'm\n"
-            f"📅 Sana: {formatted}"
+            f"{E('phone')} <code>{phone}</code>\n"
+            f"{E('money')} Narx: {price:,} so'm\n"
+            f"{E('report')} Sana: {formatted}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔑 SMS kodni olish", callback_data=f"getcode:{phone}")]
+            [ib_button("SMS kodni olish", "key", style="primary", callback_data=f"getcode:{phone}")]
         ])
         await msg.answer(text, reply_markup=kb)
 
@@ -1888,8 +1891,8 @@ async def my_orders(msg: Message, override_user_id: int | None = None):
 async def earn_money(msg: Message, override_user_id: int | None = None):
     user_id = override_user_id or msg.from_user.id
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Referal orqali", callback_data=f"referral:{user_id}")],
-        [InlineKeyboardButton(text="🎁 Kunlik bonus",   callback_data="daily_bonus")],
+        [ib_button("Referal orqali", "referral", style="primary", callback_data=f"referral:{user_id}")],
+        [ib_button("Kunlik bonus", "gift", style="success", callback_data="daily_bonus")],
     ])
     await msg.answer("💸 <b>Pul ishlash uchun bo'limni tanlang:</b>", reply_markup=kb)
 
@@ -1912,7 +1915,7 @@ async def show_referral(call: CallbackQuery):
     buttons = []
     if (await get_setting("leaderboard_public", "0")) == "1":
         buttons.append([ib_button("Reytingni ko'rish", "star", style="primary", callback_data="user_leaderboard:all")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="back_earn")])
+    buttons.append([ib_button("Orqaga", "arrow_l", style="danger", callback_data="back_earn")])
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
@@ -1943,7 +1946,7 @@ async def show_user_leaderboard(call: CallbackQuery):
          ib_button("Oylik", callback_data="user_leaderboard:month", style=("primary" if period == "month" else None))],
         [ib_button("Yillik", callback_data="user_leaderboard:year", style=("primary" if period == "year" else None)),
          ib_button("Umumiy", callback_data="user_leaderboard:all", style=("primary" if period == "all" else None))],
-        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"referral:{call.from_user.id}")],
+        [ib_button("Orqaga", "arrow_l", style="danger", callback_data=f"referral:{call.from_user.id}")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
@@ -2007,16 +2010,17 @@ async def show_admin_panel(target):
     ref_bonus_val   = await get_setting("referral_bonus", 500)
     channel_un_val  = await get_setting("required_channel_username", CHANNEL_USERNAME)
     maintenance     = await is_maintenance_mode()
+    maintenance_text = f"{E('cross')} YOQILGAN" if maintenance else f"{E('green')} O'CHIRILGAN"
     text = (
-        f"🔐 <b>Admin panel</b>\n\n"
-        f"👥 Foydalanuvchilar: <b>{users_count}</b>\n"
-        f"🛒 Jami buyurtmalar: <b>{orders_count}</b>\n"
-        f"💰 TG-Lion balansi: <b>{api_balance}</b>\n\n"
-        f"⚙️ <b>Joriy sozlamalar:</b>\n"
-        f"🎁 Kunlik bonus: <b>{daily_bonus_val} so'm</b>\n"
-        f"👥 Referal bonus: <b>{ref_bonus_val} so'm</b>\n"
-        f"📢 Kanal: <b>@{channel_un_val}</b>\n"
-        f"🔧 Ta'mirlash rejimi: <b>{'🔴 YOQILGAN' if maintenance else '🟢 O`CHIRILGAN'}</b>"
+        f"{E('admin')} <b>Admin panel</b>\n\n"
+        f"{E('referral')} Foydalanuvchilar: <b>{users_count}</b>\n"
+        f"{E('cart')} Jami buyurtmalar: <b>{orders_count}</b>\n"
+        f"{E('money')} TG-Lion balansi: <b>{api_balance}</b>\n\n"
+        f"{E('gear')} <b>Joriy sozlamalar:</b>\n"
+        f"{E('gift')} Kunlik bonus: <b>{daily_bonus_val} so'm</b>\n"
+        f"{E('referral')} Referal bonus: <b>{ref_bonus_val} so'm</b>\n"
+        f"{E('announce')} Kanal: <b>@{channel_un_val}</b>\n"
+        f"🔧 Ta'mirlash rejimi: <b>{maintenance_text}</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button("Statistika", "chart", style="primary", callback_data="adm_stats"),
@@ -2110,9 +2114,9 @@ async def adm_stats(call: CallbackQuery):
     text = "📊 <b>Sotuvlar statistikasi:</b>\n\n"
     for country, cnt, rev in stats:
         text += f"🌍 {country}: {cnt} ta — {rev:,} so'm\n"
-    text += f"\n📦 Jami buyurtmalar: <b>{total_orders}</b>\n"
-    text += f"💰 Jami daromad: <b>{total_revenue:,} so'm</b>"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_refresh")]])
+    text += f"\n{E('package')} Jami buyurtmalar: <b>{total_orders}</b>\n"
+    text += f"{E('money')} Jami daromad: <b>{total_revenue:,} so'm</b>"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")]])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
@@ -2223,14 +2227,14 @@ async def render_user_view(call: CallbackQuery, uid: int, page: str):
     text = (
         f"{E('profile')} <b>{display_name}</b>\n\n"
         f"🆔 Tartib: {u['tartib_id']} | Telegram ID: <code>{u['user_id']}</code>\n"
-        f"👤 Username: @{u['username'] or '—'}\n"
+        f"{E('profile')} Username: @{u['username'] or '—'}\n"
         f"📱 Telefon: <code>{u['phone'] or 'Tasdiqlanmagan'}</code>\n"
         f"{E('wallet')} Balans: <b>{u['balance']:,} so'm</b>\n"
         f"{E('money')} Jami to'ldirgan: {u['total_deposited']:,} so'm\n"
         f"{E('cart')} Xaridlar: {len(purchases)} ta\n"
         f"📌 Holat: <b>{status}</b>\n"
-        f"⏰ Oxirgi faollik: {last_active.strftime('%d.%m.%Y %H:%M') if last_active else '—'}\n"
-        f"📅 Ro'yxatdan o'tgan: {u['created_at'].strftime('%d.%m.%Y') if u.get('created_at') else '—'}"
+        f"{E('clock')} Oxirgi faollik: {last_active.strftime('%d.%m.%Y %H:%M') if last_active else '—'}\n"
+        f"{E('report')} Ro'yxatdan o'tgan: {u['created_at'].strftime('%d.%m.%Y') if u.get('created_at') else '—'}"
         f"{pending_part}"
     )
     block_btn = (
@@ -2316,21 +2320,21 @@ async def adm_daily_report(call: CallbackQuery):
 
     today_str = now_tashkent().strftime("%d.%m.%Y")
     text = (
-        f"📅 <b>Kunlik hisobot — {today_str}</b>\n\n"
+        f"{E('report')} <b>Kunlik hisobot — {today_str}</b>\n\n"
         f"🆕 Yangi foydalanuvchilar: <b>{new_users} ta</b>\n\n"
-        f"💳 <b>Tasdiqlangan to'lovlar</b>\n"
-        f"   ✅ Soni: <b>{topup['count']} ta</b>\n"
-        f"   💰 Summasi: <b>{topup['total']:,} so'm</b>\n\n"
-        f"🛒 <b>Sotilgan raqamlar</b>\n"
-        f"   📦 Soni: <b>{purchase['count']} ta</b>\n"
-        f"   💰 Daromad: <b>{purchase_revenue:,} so'm</b>\n\n"
-        f"🎁 Kunlik bonuslar berildi: <b>{daily_bonus['count']} ta / {daily_bonus['total']:,} so'm</b>\n"
-        f"👥 Referal bonuslar berildi: <b>{ref_bonus['count']} ta / {ref_bonus['total']:,} so'm</b>\n"
+        f"{E('card')} <b>Tasdiqlangan to'lovlar</b>\n"
+        f"   {E('check')} Soni: <b>{topup['count']} ta</b>\n"
+        f"   {E('money')} Summasi: <b>{topup['total']:,} so'm</b>\n\n"
+        f"{E('cart')} <b>Sotilgan raqamlar</b>\n"
+        f"   {E('package')} Soni: <b>{purchase['count']} ta</b>\n"
+        f"   {E('money')} Daromad: <b>{purchase_revenue:,} so'm</b>\n\n"
+        f"{E('gift')} Kunlik bonuslar berildi: <b>{daily_bonus['count']} ta / {daily_bonus['total']:,} so'm</b>\n"
+        f"{E('referral')} Referal bonuslar berildi: <b>{ref_bonus['count']} ta / {ref_bonus['total']:,} so'm</b>\n"
         f"➕➖ Admin tomonidan qo'lda o'zgartirilgan: <b>{admin_adj['count']} ta / {admin_adj['total']:+,} so'm</b>\n\n"
         f"📈 <b>Sof foyda (bugungi):</b> <b>{net_profit:,} so'm</b>\n"
         f"<i>(Sotuv daromadi − berilgan bonuslar ± admin tuzatishlari)</i>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_refresh")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")]])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
@@ -2352,7 +2356,7 @@ async def adm_user_profile_show(msg: Message, state: FSMContext):
     uid = int(msg.text.strip())
     user = await db.get_user(uid)
     if not user:
-        await msg.answer(f"❌ <code>{uid}</code> ID li foydalanuvchi topilmadi.")
+        await msg.answer(f"{E('cross')} <code>{uid}</code> ID li foydalanuvchi topilmadi.")
         await state.clear()
         await show_admin_panel(msg)
         return
@@ -2368,34 +2372,34 @@ async def adm_user_profile_show(msg: Message, state: FSMContext):
         joined_str = str(joined)
 
     if referrer:
-        referred_by_line = f"👤 Kim taklif qilgan: <b>{referrer['ref_fullname']}</b> (<code>{referrer['ref_id']}</code>)"
+        referred_by_line = f"{E('profile')} Kim taklif qilgan: <b>{referrer['ref_fullname']}</b> (<code>{referrer['ref_id']}</code>)"
     else:
         referred_by_line = "👤 Kim taklif qilgan: <i>To'g'ridan-to'g'ri kirgan</i>"
 
     text = (
-        f"🔍 <b>Foydalanuvchi profili</b>\n\n"
+        f"{E('search')} <b>Foydalanuvchi profili</b>\n\n"
         f"🆔 Tartib raqami: <b>{user['tartib_id']}</b>\n"
         f"🆔 Telegram ID: <code>{user['user_id']}</code>\n"
-        f"👤 Ism: <b>{user['fullname']}</b>\n"
-        f"🔗 Username: @{user['username'] or '—'}\n"
+        f"{E('profile')} Ism: <b>{user['fullname']}</b>\n"
+        f"{E('link')} Username: @{user['username'] or '—'}\n"
         f"📱 Telefon: <code>{user['phone'] or 'Kiritilmagan'}</code>\n"
-        f"📅 Qo'shilgan sana: <b>{joined_str}</b>\n"
+        f"{E('report')} Qo'shilgan sana: <b>{joined_str}</b>\n"
         f"{referred_by_line}\n\n"
-        f"💰 Joriy balans: <b>{user['balance']:,} so'm</b>\n"
+        f"{E('money')} Joriy balans: <b>{user['balance']:,} so'm</b>\n"
         f"💵 Jami to'ldirilgan: <b>{user['total_deposited']:,} so'm</b>\n\n"
-        f"💳 <b>To'lovlar</b>\n"
-        f"   ✅ Tasdiqlangan: <b>{tx_stats['topup_count']} marta</b>\n"
-        f"   💰 Jami summa: <b>{tx_stats['topup_total']:,} so'm</b>\n\n"
-        f"🛒 <b>Xaridlar</b>\n"
-        f"   📦 Soni: <b>{tx_stats['purchase_count']} ta</b>\n"
-        f"   💰 Jami xarajat: <b>{tx_stats['purchase_total']:,} so'm</b>\n\n"
-        f"👥 <b>Referal</b>\n"
-        f"   👤 Taklif qilganlar: <b>{ref_count} ta</b>\n"
-        f"   💰 Referaldan daromad: <b>{ref_earnings:,} so'm</b>"
+        f"{E('card')} <b>To'lovlar</b>\n"
+        f"   {E('check')} Tasdiqlangan: <b>{tx_stats['topup_count']} marta</b>\n"
+        f"   {E('money')} Jami summa: <b>{tx_stats['topup_total']:,} so'm</b>\n\n"
+        f"{E('cart')} <b>Xaridlar</b>\n"
+        f"   {E('package')} Soni: <b>{tx_stats['purchase_count']} ta</b>\n"
+        f"   {E('money')} Jami xarajat: <b>{tx_stats['purchase_total']:,} so'm</b>\n\n"
+        f"{E('referral')} <b>Referal</b>\n"
+        f"   {E('profile')} Taklif qilganlar: <b>{ref_count} ta</b>\n"
+        f"   {E('money')} Referaldan daromad: <b>{ref_earnings:,} so'm</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Boshqa profil qidirish", callback_data="adm_user_profile")],
-        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_refresh")],
+        [ib_button("Boshqa profil qidirish", "search", style="primary", callback_data="adm_user_profile")],
+        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")],
     ])
     await state.clear()
     await msg.answer(text, reply_markup=kb)
@@ -2433,7 +2437,7 @@ async def adm_balance_amount(msg: Message, state: FSMContext):
         await bot.send_message(uid, f"ℹ️ Hisobingiz admin tomonidan <b>{amount:+,} so'm</b>ga o'zgartirildi.")
     except Exception:
         pass
-    await msg.answer(f"✅ <code>{uid}</code> ID li foydalanuvchi balansi {amount:+,} so'mga o'zgartirildi.")
+    await msg.answer(f"{E('check')} <code>{uid}</code> ID li foydalanuvchi balansi {amount:+,} so'mga o'zgartirildi.")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2496,7 +2500,7 @@ async def set_default_margin_start(call: CallbackQuery, state: FSMContext):
         return
     margin = await get_default_margin()
     await call.message.edit_text(
-        f"✨ Joriy margin: <b>x{margin:g}</b>\n\n"
+        f"{E('sparkle')} Joriy margin: <b>x{margin:g}</b>\n\n"
         f"Yangi marginni kiriting (masalan <code>1.3</code> — 30% ustama demakdir):"
     )
     await state.set_state(AdminSettingsState.wait_default_margin)
@@ -2533,7 +2537,7 @@ async def price_single_start(call: CallbackQuery, state: FSMContext):
         cur   = markup_prices.get(code.upper(), None)
         label = f"{cur:,} so'm" if cur else "Standart"
         buttons.append([InlineKeyboardButton(text=f"{name} {flag}: {label}", callback_data=f"setprice:{code}")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_prices")])
+    buttons.append([ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_prices")])
     await call.message.edit_text("✏️ <b>Narx o'zgartirish — davlat tanlang:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
 
@@ -2552,7 +2556,7 @@ async def price_list(call: CallbackQuery):
         usd_price = float(info.get("price", 1))
         uzs_price = markup_prices.get(code.upper()) or await calc_default_price(usd_price)
         text += f"🌍 {name} {flag} (<code>{code}</code>): <b>{uzs_price:,} so'm</b>\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_prices")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_prices")]])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
@@ -2626,11 +2630,11 @@ async def setprice_amount(msg: Message, state: FSMContext):
     if price is None:
         return await msg.answer("❌ Faqat son kiriting, yoki bekor qilish uchun /cancel yozing.")
     if price < MIN_PRICE_SOM:
-        return await msg.answer(f"❌ Narx kamida {MIN_PRICE_SOM:,} so'm bo'lishi kerak.")
+        return await msg.answer(f"{E('cross')} Narx kamida {MIN_PRICE_SOM:,} so'm bo'lishi kerak.")
     data  = await state.get_data()
     code  = data['country']
     await db.set_markup_price(code.upper(), price)
-    await msg.answer(f"✅ {code} uchun yangi narx: {price:,} so'm o'rnatildi.")
+    await msg.answer(f"{E('check')} {code} uchun yangi narx: {price:,} so'm o'rnatildi.")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -2649,27 +2653,27 @@ async def adm_settings(call: CallbackQuery):
     auto_on = await is_auto_pay_enabled()
     auto_status_text = "✅ Yoqilgan" if auto_on else "▫️ O'chirilgan"
     text = (
-        f"⚙️ <b>Bot sozlamalari</b>\n\n"
-        f"🎁 Kunlik bonus: <b>{daily_bonus_val} so'm</b>\n"
-        f"👥 Referal bonus: <b>{ref_bonus_val} so'm</b>\n"
-        f"📢 Majburiy kanal: <b>@{channel_un}</b>\n"
-        f"📦 Buyurtmalar kanali: <b>@{orders_ch_un or 'Sozlanmagan'}</b>\n"
-        f"💳 Karta raqami: <b>{card}</b>\n"
-        f"👤 Karta egasi: <b>{owner}</b>\n"
+        f"{E('gear')} <b>Bot sozlamalari</b>\n\n"
+        f"{E('gift')} Kunlik bonus: <b>{daily_bonus_val} so'm</b>\n"
+        f"{E('referral')} Referal bonus: <b>{ref_bonus_val} so'm</b>\n"
+        f"{E('announce')} Majburiy kanal: <b>@{channel_un}</b>\n"
+        f"{E('package')} Buyurtmalar kanali: <b>@{orders_ch_un or 'Sozlanmagan'}</b>\n"
+        f"{E('card')} Karta raqami: <b>{card}</b>\n"
+        f"{E('profile')} Karta egasi: <b>{owner}</b>\n"
         f"{E('sparkle')} Premium emoji: <b>{bound_count}/{len(PREMIUM_EMOJI_SLUGS)}</b> bog'langan\n"
         f"{E('rocket')} Avtomatik to'lov (HUMOcard): <b>{auto_status_text}</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Kunlik bonusni o'zgartirish",   callback_data="set_daily_bonus")],
-        [InlineKeyboardButton(text="👥 Referal bonusni o'zgartirish",  callback_data="set_ref_bonus")],
-        [InlineKeyboardButton(text="📢 Majburiy kanalni o'zgartirish", callback_data="set_channel")],
-        [InlineKeyboardButton(text="📦 Buyurtmalar kanalini sozlash",  callback_data="set_orders_channel")],
-        [InlineKeyboardButton(text="💳 Karta raqamini o'zgartirish",   callback_data="set_card_number")],
-        [InlineKeyboardButton(text="👤 Karta egasini o'zgartirish",    callback_data="set_card_owner")],
-        [InlineKeyboardButton(text="✨ Premium emoji sozlash",         callback_data="adm_emojis")],
-        [InlineKeyboardButton(text="⚡ Avtomatik to'lov sozlamalari",  callback_data="adm_autopay")],
-        [InlineKeyboardButton(text="🔔 Yangi a'zo va eslatmalar",      callback_data="adm_notify")],
-        [InlineKeyboardButton(text="⬅️ Orqaga",                       callback_data="adm_refresh")],
+        [ib_button("Kunlik bonusni o'zgartirish", "gift", callback_data="set_daily_bonus")],
+        [ib_button("Referal bonusni o'zgartirish", "referral", callback_data="set_ref_bonus")],
+        [ib_button("Majburiy kanalni o'zgartirish", "announce", callback_data="set_channel")],
+        [ib_button("Buyurtmalar kanalini sozlash", "package", callback_data="set_orders_channel")],
+        [ib_button("Karta raqamini o'zgartirish", "card", callback_data="set_card_number")],
+        [ib_button("Karta egasini o'zgartirish", "profile", callback_data="set_card_owner")],
+        [ib_button("Premium emoji sozlash", "sparkle", style="primary", callback_data="adm_emojis")],
+        [ib_button("Avtomatik to'lov sozlamalari", "rocket", style="primary", callback_data="adm_autopay")],
+        [ib_button("Yangi a'zo va eslatmalar", "bell", callback_data="adm_notify")],
+        [ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_refresh")],
     ])
     await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
@@ -2683,7 +2687,7 @@ async def adm_notify_cb(call: CallbackQuery):
     incomplete_hrs = await get_setting("incomplete_reminder_hours", INCOMPLETE_HOURS_DEFAULT)
     low_bal        = await get_setting("low_balance_threshold", LOW_BALANCE_THRESHOLD_DEFAULT)
     text = (
-        f"🔔 <b>Hodisalar kanali va eslatma sozlamalari</b>\n\n"
+        f"{E('bell')} <b>Hodisalar kanali va eslatma sozlamalari</b>\n\n"
         f"{E('sparkle')} Hodisalar kanali: <b>{channel_id or 'Sozlanmagan'}</b>\n"
         f"<i>Shu kanalga quyidagilar avtomatik yuboriladi:</i>\n"
         f"  • Yangi a'zo qo'shilganda\n"
@@ -2747,7 +2751,7 @@ async def set_new_user_channel_apply(msg: Message, state: FSMContext):
     try:
         test_msg = await bot.send_message(int(channel_id), f"{E('check')} Bu kanal endi yangi a'zolar uchun sozlandi!")
     except Exception as e:
-        return await msg.answer(f"❌ Bu kanalga xabar yuborib bo'lmadi: {e}\nBotni o'sha kanalga admin qilib qo'shganingizga ishonch hosil qiling.")
+        return await msg.answer(f"{E('cross')} Bu kanalga xabar yuborib bo'lmadi: {e}\nBotni o'sha kanalga admin qilib qo'shganingizga ishonch hosil qiling.")
     await db.set_setting("new_user_channel_id", channel_id)
     await msg.answer(f"{E('check')} Yangi a'zo kanali sozlandi!")
     await state.clear()
@@ -2805,14 +2809,14 @@ async def adm_autopay_cb(call: CallbackQuery):
     configured   = await is_humo_configured()
     live_status  = humo_listener.get_status()
     if live_status["connected"]:
-        listener_status = f"✅ Ulangan: {live_status['account']}"
+        listener_status = f"{E('check')} Ulangan: {live_status['account']}"
     elif configured:
         listener_status = "🟡 Sozlangan, lekin hozir ulanmagan (botni qayta ishga tushiring)"
     else:
         listener_status = "❌ Sozlanmagan"
     tolov_cfg = await get_tolov_config()
     if tolov_cfg["enabled"] and tolov_cfg["shop_id"]:
-        tolov_status = f"✅ Yoqilgan (shop_id: {tolov_cfg['shop_id']})"
+        tolov_status = f"{E('check')} Yoqilgan (shop_id: {tolov_cfg['shop_id']})"
     elif tolov_cfg["shop_id"]:
         tolov_status = "🟡 Sozlangan, lekin o'chirilgan"
     else:
@@ -2821,13 +2825,13 @@ async def adm_autopay_cb(call: CallbackQuery):
     text = (
         f"⚡ <b>Avtomatik to'lov sozlamalari</b>\n\n"
         f"🔘 Avtomatik rejim: <b>{auto_status_text}</b>\n"
-        f"💳 2-karta: <b>{card2_number or 'Sozlanmagan'}</b>"
+        f"{E('card')} 2-karta: <b>{card2_number or 'Sozlanmagan'}</b>"
         f"{f' ({card2_owner})' if card2_owner else ''}\n"
         f"🔢 Urinishlar soni (tasodifiy summa uchun): <b>{max_offset}</b>\n"
-        f"⏰ Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
+        f"{E('clock')} Kutish muddati: <b>{expiry_min} daqiqa</b>\n\n"
         f"<b>Uchta mustaqil (parallel) usul mavjud:</b>\n"
         f"1️⃣ Telethon tinglovchi: <b>{listener_status}</b>\n"
-        f"2️⃣ Webhook server: <b>✅ Har doim tayyor</b>\n"
+        f"2️⃣ Webhook server: <b>{E('check')} Har doim tayyor</b>\n"
         f"<i>(tashqi xizmat — masalan karta SMS kuzatuvchi bot — sizga so'rov yuboradi)</i>\n"
         f"3️⃣ TolovAPI (tolov.run.place): <b>{tolov_status}</b>\n"
         f"<i>(siz o'zingiz shop_id/shop_key orqali davriy so'rov yuborasiz)</i>"
@@ -2860,8 +2864,8 @@ async def adm_tolov_api_cb(call: CallbackQuery):
         f"kerak emas, faqat shop_id/shop_key orqali davriy tekshiriladi.</i>\n\n"
         f"🔘 Holat: <b>{status_text}</b>\n"
         f"🆔 Shop ID: <code>{cfg['shop_id'] or 'Sozlanmagan'}</code>\n"
-        f"🔑 Shop Key: <code>{'•' * len(cfg['shop_key']) if cfg['shop_key'] else 'Sozlanmagan'}</code>\n"
-        f"🌐 API manzili: <code>{cfg['api_url']}</code>"
+        f"{E('key')} Shop Key: <code>{'•' * len(cfg['shop_key']) if cfg['shop_key'] else 'Sozlanmagan'}</code>\n"
+        f"{E('globe')} API manzili: <code>{cfg['api_url']}</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [ib_button(("O'chirish" if cfg["enabled"] else "Yoqish"), "rocket",
@@ -2983,7 +2987,7 @@ async def check_humo_status_cb(call: CallbackQuery):
         text = (
             f"{E('check')} <b>Ulangan va ishlayapti!</b>\n\n"
             f"{E('profile')} Akkaunt: <b>{status['account']}</b>\n"
-            f"📞 Telefon: <code>{status.get('phone') or '—'}</code>\n\n"
+            f"{E('phone')} Telefon: <code>{status.get('phone') or '—'}</code>\n\n"
             f"<i>Demak HUMOcard botidan kelayotgan xabarlar shu akkaunt orqali "
             f"real vaqtda kuzatilmoqda.</i>"
         )
@@ -3075,7 +3079,7 @@ async def setup_humo_phone(msg: Message, state: FSMContext):
         sent = await client.send_code_request(phone)
     except Exception as e:
         await client.disconnect()
-        await msg.answer(f"❌ Kod yuborishda xatolik: {e}")
+        await msg.answer(f"{E('cross')} Kod yuborishda xatolik: {e}")
         return
 
     _humo_setup_ctx[msg.from_user.id] = {
@@ -3106,7 +3110,7 @@ async def setup_humo_code(msg: Message, state: FSMContext):
         await state.set_state(HumoSetupStates.wait_password)
         return
     except Exception as e:
-        await msg.answer(f"❌ Kod xato yoki muddati o'tgan: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
+        await msg.answer(f"{E('cross')} Kod xato yoki muddati o'tgan: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
         return
     await _finish_humo_setup(msg, state)
 
@@ -3122,7 +3126,7 @@ async def setup_humo_password(msg: Message, state: FSMContext):
     try:
         await ctx["client"].sign_in(password=msg.text.strip())
     except Exception as e:
-        await msg.answer(f"❌ Parol xato: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
+        await msg.answer(f"{E('cross')} Parol xato: {e}\n\nQaytadan urinib ko'ring yoki /cancel yozing.")
         return
     await _finish_humo_setup(msg, state)
 
@@ -3288,7 +3292,7 @@ async def set_autopay_expiry_apply(msg: Message, state: FSMContext):
     MIN_EXPIRY_MIN = 5
     if val is None or val < MIN_EXPIRY_MIN:
         return await msg.answer(
-            f"❌ Kamida {MIN_EXPIRY_MIN} daqiqa bo'lishi kerak.\n\n"
+            f"{E('cross')} Kamida {MIN_EXPIRY_MIN} daqiqa bo'lishi kerak.\n\n"
             f"{E('warn')} Diqqat: bank/karta tizimlari real to'lovni aniqlashda "
             f"ba'zan bir necha o'n soniyadan bir necha daqiqagacha kechikishi mumkin. "
             f"Juda qisqa muddat qo'ysangiz, foydalanuvchi TO'G'RI to'lov qilsa ham, "
@@ -3306,7 +3310,7 @@ async def adm_emojis_cb(call: CallbackQuery):
     lines = [f"{E('sparkle')} <b>Premium emoji sozlamalari</b>\n"]
     for slug, fallback in PREMIUM_EMOJI_SLUGS.items():
         bound = PREMIUM_EMOJI_CACHE.get(slug)
-        status = f"✅ bog'langan (<code>{bound}</code>)" if bound else "▫️ oddiy emoji"
+        status = f"{E('check')} bog'langan (<code>{bound}</code>)" if bound else "▫️ oddiy emoji"
         lines.append(f"{fallback} <code>{slug}</code> — {status}")
     lines.append(
         "\n<b>Qanday bog'lash kerak:</b>\n"
@@ -3315,7 +3319,7 @@ async def adm_emojis_cb(call: CallbackQuery):
         "3️⃣ Bot ID beradi — <code>/setemoji slug id</code> bilan bog'lang\n"
         "4️⃣ Bekor qilish: <code>/unsetemoji slug</code>"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_settings")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[ib_button("Orqaga", "arrow_l", style="danger", callback_data="adm_settings")]])
     await call.message.edit_text("\n".join(lines), reply_markup=kb)
     await call.answer()
 
@@ -3332,7 +3336,7 @@ async def set_daily_bonus_save(msg: Message, state: FSMContext):
     val = parse_amount(msg.text)
     if val is None: return await msg.answer("❌ Faqat son kiriting!")
     await db.set_setting("daily_bonus", str(val))
-    await msg.answer(f"✅ Kunlik bonus {val:,} so'm ga o'zgartirildi!")
+    await msg.answer(f"{E('check')} Kunlik bonus {val:,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3349,7 +3353,7 @@ async def set_ref_bonus_save(msg: Message, state: FSMContext):
     val = parse_amount(msg.text)
     if val is None: return await msg.answer("❌ Faqat son kiriting!")
     await db.set_setting("referral_bonus", str(val))
-    await msg.answer(f"✅ Referal bonus {val:,} so'm ga o'zgartirildi!")
+    await msg.answer(f"{E('check')} Referal bonus {val:,} so'm ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3374,7 +3378,7 @@ async def set_channel_username_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
     username = msg.text.strip().lstrip("@")
     await db.set_setting("required_channel_username", username)
-    await msg.answer(f"✅ Kanal @{username} ga o'zgartirildi!")
+    await msg.answer(f"{E('check')} Kanal @{username} ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3399,7 +3403,7 @@ async def set_orders_channel_username_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
     username = msg.text.strip().lstrip("@")
     await db.set_setting("orders_channel_username", username)
-    await msg.answer(f"✅ Buyurtmalar kanali @{username} ga o'zgartirildi!")
+    await msg.answer(f"{E('check')} Buyurtmalar kanali @{username} ga o'zgartirildi!")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3414,7 +3418,7 @@ async def set_card_number_start(call: CallbackQuery, state: FSMContext):
 async def set_card_number_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
     await db.set_setting("card_number", msg.text.strip())
-    await msg.answer(f"✅ Karta raqami o'zgartirildi: <code>{msg.text.strip()}</code>")
+    await msg.answer(f"{E('check')} Karta raqami o'zgartirildi: <code>{msg.text.strip()}</code>")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3429,7 +3433,7 @@ async def set_card_owner_start(call: CallbackQuery, state: FSMContext):
 async def set_card_owner_save(msg: Message, state: FSMContext):
     if msg.from_user.id != ADMIN_ID: return
     await db.set_setting("card_owner", msg.text.strip())
-    await msg.answer(f"✅ Karta egasi o'zgartirildi: <b>{msg.text.strip()}</b>")
+    await msg.answer(f"{E('check')} Karta egasi o'zgartirildi: <b>{msg.text.strip()}</b>")
     await state.clear()
     await show_admin_panel(msg)
 
@@ -3446,14 +3450,14 @@ async def adm_search_phone(msg: Message, state: FSMContext):
     phone  = msg.text.strip()
     result = await db.find_purchase_by_phone(phone)
     if not result:
-        await msg.answer(f"❌ <code>{phone}</code> raqami bo'yicha xarid topilmadi.")
+        await msg.answer(f"{E('cross')} <code>{phone}</code> raqami bo'yicha xarid topilmadi.")
     else:
         text = (
-            f"✅ <b>Raqam topildi!</b>\n\n"
-            f"📞 Raqam: <code>{result['phone']}</code>\n"
+            f"{E('check')} <b>Raqam topildi!</b>\n\n"
+            f"{E('phone')} Raqam: <code>{result['phone']}</code>\n"
             f"🌍 Davlat: {result['country_name']}\n"
-            f"📅 Sotilgan sana: {result['created_at']}\n\n"
-            f"👤 <b>Xaridor:</b>\n"
+            f"{E('report')} Sotilgan sana: {result['created_at']}\n\n"
+            f"{E('profile')} <b>Xaridor:</b>\n"
             f"Ism: {result['fullname']}\n"
             f"ID: <code>{result['user_id']}</code>"
         )
@@ -3487,7 +3491,7 @@ async def broadcast_send(msg: Message, state: FSMContext):
             except Exception:
                 pass
         await asyncio.sleep(0.05)
-    await status_msg.edit_text(f"📣 Xabar yuborildi:\n✅ Muvaffaqiyatli: {sent} ta\n❌ Yetib bormadi: {failed} ta")
+    await status_msg.edit_text(f"📣 Xabar yuborildi:\n{E('check')} Muvaffaqiyatli: {sent} ta\n{E('cross')} Yetib bormadi: {failed} ta")
     await state.clear()
     await show_admin_panel(msg)
 
