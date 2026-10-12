@@ -25,6 +25,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 import humo_listener
 import tolov_api
+import smm  # SMM xizmatlari (LockSMM API) — qarang: smm.py
 
 from database import Database
 
@@ -118,6 +119,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
     bog'lagach, pastdagi menyu ham darhol yangilanadi."""
     return ReplyKeyboardMarkup(
         keyboard=[
+            [kb_button("Xizmatlar", "smm_menu", style="primary")],
             [kb_button("Nomer olish", "phone"),   kb_button("Buyurtmalarim", "cart")],
             [kb_button("Hisobim", "money"),        kb_button("Hisob to'ldirish", "card", style="primary")],
             [kb_button("Pul ishlash", "cash"),     kb_button("Qo'llanma", "guide")],
@@ -638,6 +640,8 @@ PREMIUM_EMOJI_SLUGS = {
     "refresh":   "🔄",
     "announce":  "📢",
 }
+# SMM bo'limi uchun qo'shimcha slug'lar (tarmoq/katalog ikonlari va h.k.)
+PREMIUM_EMOJI_SLUGS.update(smm.SMM_EMOJI_SLUGS)
 
 PREMIUM_EMOJI_CACHE: dict[str, str] = {}
 
@@ -758,7 +762,16 @@ async def emojis_list_cmd(msg: Message):
         f"{E('sparkle')} <b>Endi bog'langan sluglar avtomatik ravishda</b> xabar matnlarida "
         f"HAM, pastdagi menyu va tugmalarda HAM (icon sifatida) qo'llanadi — alohida sozlash shart emas."
     )
-    await msg.answer("\n".join(lines))
+    # Telegram xabari 4096 belgidan oshmasligi uchun bo'laklarga bo'lamiz
+    chunk, size = [], 0
+    for ln in lines:
+        if size + len(ln) > 3500 and chunk:
+            await msg.answer("\n".join(chunk))
+            chunk, size = [], 0
+        chunk.append(ln)
+        size += len(ln) + 1
+    if chunk:
+        await msg.answer("\n".join(chunk))
 
 
 @admin_router.message(F.text == "/getemojiid")
@@ -1385,6 +1398,7 @@ def welcome_text(first_name: str) -> str:
     return (
         f"{hello}\n\n"
         f"Botimizga xush kelibsiz! Bu yerda siz:\n\n"
+        f"{E('smm_menu')} Telegram, Instagram, TikTok, YouTube uchun obunachi, layk va ko'rish xizmatlariga buyurtma berasiz\n"
         f"{E('phone')} Telegram uchun virtual raqamlar sotib olasiz\n"
         f"{E('card')} Hisobingizni bir necha soniyada to'ldirasiz\n"
         f"{E('referral')} Do'stlaringizni taklif qilib pul ishlaysiz\n"
@@ -2033,6 +2047,7 @@ async def show_admin_panel(target):
          ib_button("Xabar yuborish", "bell", style="primary", callback_data="adm_broadcast")],
         [ib_button("Referal reytingi", "star", style="primary", callback_data="adm_leaderboard:all"),
          ib_button("Bot sozlamalari", "gear", callback_data="adm_settings")],
+        [ib_button("SMM xizmatlar (LockSMM)", "smm_menu", style="primary", callback_data="smm_admin")],
         [ib_button("Yangilash", "sparkle", callback_data="adm_refresh")],
         [ib_button(
             ("Ta'mirlashni o'chirish" if maintenance else "Ta'mirlash rejimini yoqish"), "warn",
@@ -3496,8 +3511,22 @@ async def broadcast_send(msg: Message, state: FSMContext):
     await show_admin_panel(msg)
 
 # ─── ISHGA TUSHIRISH ───────────────────────────────────────────
+async def notify_orders_channel(text: str):
+    """SMM buyurtmalari haqida 'buyurtmalar kanali'ga xabar yuboradi."""
+    ch = await get_setting("orders_channel_id", ORDERS_CHANNEL)
+    try:
+        await bot.send_message(int(ch), text)
+    except Exception as e:
+        print(f"⚠️ Buyurtmalar kanaliga xabar yuborib bo'lmadi: {e}")
+
 async def main():
     await db.init()
+    # ── SMM (LockSMM) ──
+    smm.setup(db=db, bot=bot, admin_id=ADMIN_ID, E=E, ib_button=ib_button,
+              notify_orders=notify_orders_channel, log_event=log_event)
+    await smm.init()
+    admin_router.include_router(smm.admin_router)
+    router.include_router(smm.router)
     try:
         await reload_premium_emoji_cache()
     except Exception as e:
@@ -3525,6 +3554,11 @@ async def main():
             print("ℹ️ TolovAPI sozlanmagan yoki o'chirilgan — admin panel → Avtomatik to'lov → TolovAPI orqali sozlashingiz mumkin")
     except Exception as e:
         print(f"⚠️ TolovAPI polling siklini ishga tushirishda xatolik (asosiy bot baribir ishlayveradi): {e}")
+    try:
+        smm.start_tasks()
+        print("✅ SMM: xizmatlarni avtomatik yangilash va buyurtma holati kuzatuvi ishga tushirildi ✅")
+    except Exception as e:
+        print(f"⚠️ SMM fon sikllarini ishga tushirishda xatolik: {e}")
     try:
         asyncio.create_task(reminder_loop())
         print("✅ Faollik eslatmalari sikli ishga tushirildi ✅")
